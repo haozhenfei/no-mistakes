@@ -35,40 +35,33 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
-	// Run in a dedicated process group so cancelling ctx reaps the acpx CLI
-	// and any subprocesses it spawns, not just the direct child.
 	shellenv.ConfigureShellCommand(cmd)
 
-	stdout, err := cmd.StdoutPipe()
+	started, err := startNativeAgentCommand(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("acpx stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("acpx stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("acpx start: %w", err)
 	}
+	defer started.closePipes()
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
 	stderrWG.Add(1)
 	go func() {
 		defer stderrWG.Done()
-		stderrBuf, _ = io.ReadAll(stderr)
+		stderrBuf, _ = io.ReadAll(started.stderr)
 	}()
 
 	var usage TokenUsage
-	text, stdoutErr, err := parseAcpxJSONEvents(ctx, stdout, opts.OnChunk, &usage)
-	stderrWG.Wait()
+	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage)
 	if err != nil {
-		_ = cmd.Wait()
+		err = started.waitAfterParseError(err)
+		stderrWG.Wait()
 		return nil, fmt.Errorf("acpx parse events: %w", err)
 	}
-	if err := cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("acpx exited: %w: %s", err, acpxProcessErrorOutput(stderrBuf, stdoutErr))
+	waitErr := started.wait()
+	stderrWG.Wait()
+	if waitErr != nil {
+		return nil, fmt.Errorf("acpx exited: %w: %s", waitErr, acpxProcessErrorOutput(stderrBuf, stdoutErr))
 	}
 	if usage.OutputTokens == 0 {
 		usage.OutputTokens = estimateAcpxTokens(len(text))

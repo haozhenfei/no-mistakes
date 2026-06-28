@@ -247,15 +247,12 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
-	// Isolate the command in its own process group so that cancelling ctx kills
-	// the whole tree (e.g. npm -> node test workers), not just the shell parent.
-	// Otherwise grandchildren survive, keep running, and hold the worktree locked.
 	shellenv.ConfigureShellCommand(cmd)
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = mergeEnv(env)
 	}
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return string(out), ee.ExitCode(), nil

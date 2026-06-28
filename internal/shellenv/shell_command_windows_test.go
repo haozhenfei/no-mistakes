@@ -3,10 +3,13 @@
 package shellenv
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"strconv"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // TestIsTaskkillAlreadyGone pins down the locale-independent contract the
@@ -33,6 +36,60 @@ func TestIsTaskkillAlreadyGone(t *testing.T) {
 				t.Fatalf("isTaskkillAlreadyGone(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStartShellCommandFailsWhenJobSetupFails(t *testing.T) {
+	setupErr := errors.New("job setup denied")
+	oldNewJob := newShellCommandJobFunc
+	newShellCommandJobFunc = func() (windows.Handle, error) {
+		return 0, setupErr
+	}
+	t.Cleanup(func() {
+		newShellCommandJobFunc = oldNewJob
+	})
+
+	cmd := exec.CommandContext(context.Background(), "cmd", "/c", "exit", "0")
+	ConfigureShellCommand(cmd)
+	if _, ok := shellCommandJob(cmd); ok {
+		t.Fatal("expected no job state when job setup fails")
+	}
+	err := StartShellCommand(cmd)
+	if !errors.Is(err, setupErr) {
+		t.Fatalf("StartShellCommand() error = %v, want setup error", err)
+	}
+	if cmd.Process != nil {
+		t.Fatal("expected command not to start after job setup failure")
+	}
+}
+
+func TestStartShellCommandFailsWhenJobAssignmentFails(t *testing.T) {
+	assignmentErr := errors.New("assignment denied")
+	oldAssign := assignShellCommandJobFunc
+	assignShellCommandJobFunc = func(windows.Handle, uint32) error {
+		return assignmentErr
+	}
+	t.Cleanup(func() {
+		assignShellCommandJobFunc = oldAssign
+	})
+
+	cmd := exec.CommandContext(context.Background(), "cmd", "/c", "exit", "0")
+	ConfigureShellCommand(cmd)
+	if _, ok := shellCommandJob(cmd); !ok {
+		t.Skip("job object setup unavailable")
+	}
+	err := StartShellCommand(cmd)
+	if !errors.Is(err, assignmentErr) {
+		t.Fatalf("StartShellCommand() error = %v, want assignment error", err)
+	}
+	if _, ok := shellCommandJob(cmd); ok {
+		t.Fatal("expected failed job state to be closed")
+	}
+	if cmd.Process == nil {
+		t.Fatal("expected command to have started before assignment failure")
+	}
+	if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
+		t.Fatal("expected failed start to kill and wait for the suspended process")
 	}
 }
 

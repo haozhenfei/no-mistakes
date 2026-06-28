@@ -62,43 +62,34 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
-	// Run in a dedicated process group so cancelling ctx reaps the codex CLI
-	// and any subprocesses it spawns, not just the direct child.
 	shellenv.ConfigureShellCommand(cmd)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("codex stdout pipe: %w", err)
-	}
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
-	stderrR, err := cmd.StderrPipe()
+	started, err := startNativeAgentCommand(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("codex stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("codex start: %w", err)
 	}
+	defer started.closePipes()
 
 	stderrWG.Add(1)
 	go func() {
 		defer stderrWG.Done()
-		stderrBuf, _ = io.ReadAll(stderrR)
+		stderrBuf, _ = io.ReadAll(started.stderr)
 	}()
 
 	var usage TokenUsage
 	var lastMessage string
 	var codexErr string
-	if err := parseCodexEvents(ctx, stdout, opts.OnChunk, &usage, &lastMessage, &codexErr); err != nil {
+	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &codexErr); err != nil {
+		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
-		_ = cmd.Wait()
 		return nil, fmt.Errorf("codex parse events: %w", err)
 	}
 
+	waitErr := started.wait()
 	stderrWG.Wait()
-	if err := cmd.Wait(); err != nil {
+	if waitErr != nil {
 		detail := strings.TrimSpace(codexErr)
 		stderr := strings.TrimSpace(string(stderrBuf))
 		if detail != "" && stderr != "" {
@@ -106,7 +97,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		} else if detail == "" {
 			detail = stderr
 		}
-		return nil, fmt.Errorf("codex exited: %w: %s", err, detail)
+		return nil, fmt.Errorf("codex exited: %w: %s", waitErr, detail)
 	}
 
 	return finalizeTextResult("codex", lastMessage, validationSchema, usage)
