@@ -6,18 +6,23 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
-	Ctx              context.Context
-	Run              *db.Run
-	Repo             *db.Repo
-	WorkDir          string
-	Agent            agent.Agent
-	Config           *config.Config
-	DB               *db.DB
+	Ctx     context.Context
+	Run     *db.Run
+	Repo    *db.Repo
+	WorkDir string
+	Agent   agent.Agent
+	Config  *config.Config
+	DB      *db.DB
+	// Paths gives steps access to app state locations outside the worktree,
+	// such as the evidence signing key under NM_HOME. May be nil in tests that
+	// do not exercise evidence.
+	Paths            *paths.Paths
 	Log              func(string) // discrete log line (newline-terminated, user-visible + file)
 	LogChunk         func(string) // raw streaming chunk (user-visible + file)
 	LogFile          func(string) // file-only log callback (not shown to user)

@@ -54,6 +54,7 @@ type GlobalConfig struct {
 	AutoFix              AutoFixRaw
 	Intent               IntentRaw
 	Test                 TestRaw
+	Verify               VerifyRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -70,6 +71,7 @@ type globalConfigRaw struct {
 	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
+	Verify               VerifyRaw           `yaml:"verify"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -88,6 +90,7 @@ type RepoConfig struct {
 	AutoFix           AutoFixRaw `yaml:"auto_fix"`
 	Intent            IntentRaw  `yaml:"intent"`
 	Test              TestRaw    `yaml:"test"`
+	Verify            VerifyRaw  `yaml:"verify"`
 }
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -99,6 +102,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		AutoFix           AutoFixRaw `yaml:"auto_fix"`
 		Intent            IntentRaw  `yaml:"intent"`
 		Test              TestRaw    `yaml:"test"`
+		Verify            VerifyRaw  `yaml:"verify"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -112,6 +116,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.AutoFix = raw.AutoFix
 	c.Intent = raw.Intent
 	c.Test = raw.Test
+	c.Verify = raw.Verify
 	return nil
 }
 
@@ -128,6 +133,7 @@ type AutoFixRaw struct {
 	Lint     *int `yaml:"lint"`
 	Test     *int `yaml:"test"`
 	Review   *int `yaml:"review"`
+	Verify   *int `yaml:"verify"`
 	Document *int `yaml:"document"`
 	CI       *int `yaml:"ci"`
 	Babysit  *int `yaml:"babysit"`
@@ -140,6 +146,7 @@ type AutoFix struct {
 	Lint     int
 	Test     int
 	Review   int
+	Verify   int
 	Document int
 	CI       int
 	Rebase   int
@@ -161,6 +168,7 @@ type Config struct {
 	AutoFix              AutoFix
 	Intent               Intent
 	Test                 Test
+	Verify               Verify
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -178,6 +186,18 @@ type EvidenceRaw struct {
 // Test is the resolved test-step config.
 type Test struct {
 	Evidence Evidence
+}
+
+// VerifyRaw is the YAML representation of verify-step settings.
+type VerifyRaw struct {
+	Skeptics *int `yaml:"skeptics"`
+}
+
+// Verify is the resolved verify-step config. Skeptics is the number of
+// independent adversarial evaluations run per claim; majority vote decides the
+// verdict (design §4.4a).
+type Verify struct {
+	Skeptics int
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -724,6 +744,7 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.AutoFix = raw.AutoFix
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	cfg.Verify = raw.Verify
 
 	return cfg, nil
 }
@@ -894,12 +915,33 @@ func applyTestOverrides(dst *Test, src *TestRaw) {
 	}
 }
 
-// autoFixDefaults returns the default auto-fix configuration.
+// verifyDefaults returns the default verify-step settings. Three independent
+// skeptics per claim is the design default (§4.4a).
+func verifyDefaults() Verify {
+	return Verify{Skeptics: 3}
+}
+
+// applyVerifyOverrides applies non-nil raw values onto resolved defaults. A
+// skeptic count below 1 is clamped up to 1 so verification always runs at least
+// one adversarial pass.
+func applyVerifyOverrides(dst *Verify, src *VerifyRaw) {
+	if src.Skeptics != nil {
+		dst.Skeptics = *src.Skeptics
+	}
+	if dst.Skeptics < 1 {
+		dst.Skeptics = 1
+	}
+}
+
+// autoFixDefaults returns the default auto-fix configuration. Verify defaults to
+// 0 (like review): a REFUTED claim parks for an agent/human decision rather than
+// being silently self-fixed (design §4.4a).
 func autoFixDefaults() AutoFix {
 	return AutoFix{
 		Lint:     3,
 		Test:     3,
 		Review:   0,
+		Verify:   0,
 		Document: 3,
 		CI:       3,
 		Rebase:   3,
@@ -916,6 +958,9 @@ func applyAutoFixOverrides(dst *AutoFix, src *AutoFixRaw) {
 	}
 	if src.Review != nil {
 		dst.Review = *src.Review
+	}
+	if src.Verify != nil {
+		dst.Verify = *src.Verify
 	}
 	if src.Document != nil {
 		dst.Document = *src.Document
@@ -938,6 +983,8 @@ func (c *Config) AutoFixLimit(step types.StepName) int {
 		return c.AutoFix.Test
 	case types.StepReview:
 		return c.AutoFix.Review
+	case types.StepVerify:
+		return c.AutoFix.Verify
 	case types.StepDocument:
 		return c.AutoFix.Document
 	case types.StepCI:
@@ -965,6 +1012,10 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyTestOverrides(&test, &global.Test)
 	applyTestOverrides(&test, &repo.Test)
 
+	verify := verifyDefaults()
+	applyVerifyOverrides(&verify, &global.Verify)
+	applyVerifyOverrides(&verify, &repo.Verify)
+
 	cfg := &Config{
 		Agent:                global.Agent,
 		Agents:               copyAgents(global.Agents),
@@ -980,6 +1031,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		AutoFix:              af,
 		Intent:               intent,
 		Test:                 test,
+		Verify:               verify,
 	}
 
 	if repo.Agent != "" {
