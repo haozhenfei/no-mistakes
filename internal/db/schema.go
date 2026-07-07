@@ -88,6 +88,19 @@ CREATE TABLE IF NOT EXISTS verify_verdicts (
     votes_json    TEXT,
     created_at    INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS coverage_entries (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    file          TEXT NOT NULL,
+    start_line    INTEGER NOT NULL,
+    end_line      INTEGER NOT NULL,
+    state         TEXT NOT NULL,
+    reason        TEXT,
+    evidence_json TEXT,
+    source        TEXT,
+    created_at    INTEGER NOT NULL
+);
 `
 
 // migrationStatements hold additive schema changes applied to databases that

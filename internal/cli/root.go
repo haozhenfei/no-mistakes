@@ -95,6 +95,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newAxiCmd())
 	cmd.AddCommand(newEvidenceCmd())
 	cmd.AddCommand(newClaimCmd())
+	cmd.AddCommand(newCoverageCmd())
 
 	return cmd
 }

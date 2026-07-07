@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/claims"
+	"github.com/kunchenguid/no-mistakes/internal/covaudit"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -27,8 +28,12 @@ import (
 // existing primitives (a within-step fix round bounded by auto_fix.verify, or a
 // cross-run replay). The executor's sequential model is untouched.
 //
-// MVP scope: refutation only. Spot-check reproduction (§4.4b) and coverage audit
-// (§4.4c) are deferred.
+// Coverage audit (§4.4c) also runs here (see runCoverageAudit): the coverage
+// ledger is backfilled from captured instrumentation and machine-checked for
+// completeness / runtime-truth / static rigor. Its issues surface as findings
+// but do not themselves park the run — parking stays driven by REFUTED claims;
+// coverage results are a data source for §6 risk routing (not built here).
+// Spot-check reproduction (§4.4b) remains deferred.
 type VerifyStep struct{}
 
 func (s *VerifyStep) Name() types.StepName { return types.StepVerify }
@@ -124,8 +129,19 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		}
 	}
 
+	// Coverage audit (§4.4c): backfill the ledger from captured instrumentation
+	// and machine-check completeness / runtime-truth / static rigor. It is
+	// observability + a data source for §6 routing (not built here), so its
+	// issues surface as findings but do not themselves park the run — parking
+	// stays driven by REFUTED claims. Best-effort: a failure logs and is skipped.
+	coverageFindings, coverageSummary := s.runCoverageAudit(sctx)
+	findings = append(findings, coverageFindings...)
+
 	needsApproval := refuted > 0
 	summary := fmt.Sprintf("verify: %d confirmed, %d plausible, %d refuted across %d claim(s)/finding(s)", confirmed, plausible, refuted, len(targets))
+	if coverageSummary != "" {
+		summary += "; " + coverageSummary
+	}
 	sctx.Log(summary)
 
 	findingsJSON, _ := json.Marshal(Findings{Items: findings, Summary: summary})
@@ -135,6 +151,39 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
 	}, nil
+}
+
+// runCoverageAudit runs the coverage backfill + audit for the run and turns the
+// report into non-parking findings. Returns the findings and a one-line summary
+// (empty when coverage could not be evaluated).
+func (s *VerifyStep) runCoverageAudit(sctx *pipeline.StepContext) ([]Finding, string) {
+	if sctx.DB == nil || sctx.Paths == nil || sctx.Run == nil {
+		return nil, ""
+	}
+	res, err := covaudit.Run(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, sctx.Paths.EvidenceKeyFile(), sctx.Run.BaseSHA, sctx.Run.HeadSHA)
+	if err != nil {
+		sctx.Log(fmt.Sprintf("verify: coverage audit skipped: %v", err))
+		return nil, ""
+	}
+	if res.Report.TotalHunks == 0 {
+		return nil, ""
+	}
+	var findings []Finding
+	for _, dg := range res.Downgrades {
+		findings = append(findings, Finding{
+			Severity:    "warning",
+			Action:      types.ActionNoOp,
+			Description: fmt.Sprintf("coverage: %s:%d-%d downgraded %s→%s — %s", dg.Hunk.File, dg.Hunk.Start, dg.Hunk.End, dg.From, dg.To, dg.Reason),
+		})
+	}
+	for _, is := range res.Report.Issues {
+		findings = append(findings, Finding{
+			Severity:    "warning",
+			Action:      types.ActionNoOp,
+			Description: fmt.Sprintf("coverage audit [%s]: %s:%d-%d — %s", is.Kind, is.Hunk.File, is.Hunk.Start, is.Hunk.End, is.Detail),
+		})
+	}
+	return findings, res.Report.String()
 }
 
 // adjudicate runs the skeptics and returns the majority verdict, a combined

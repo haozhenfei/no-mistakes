@@ -9,6 +9,8 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
+	"github.com/kunchenguid/no-mistakes/internal/covaudit"
+	"github.com/kunchenguid/no-mistakes/internal/coverage"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -259,7 +261,8 @@ func (s *PRStep) buildDossierSection(sctx *pipeline.StepContext) string {
 		slog.Warn("dossier: failed to load verify verdicts", "error", err)
 		return ""
 	}
-	if len(claimList) == 0 && len(verdicts) == 0 {
+	ledger, coverageReport := s.loadCoverageForDossier(sctx)
+	if len(claimList) == 0 && len(verdicts) == 0 && len(ledger) == 0 {
 		return ""
 	}
 
@@ -283,12 +286,37 @@ func (s *PRStep) buildDossierSection(sctx *pipeline.StepContext) string {
 	}
 
 	return BuildDossier(DossierData{
-		RunID:    sctx.Run.ID,
-		Commit:   sctx.Run.HeadSHA,
-		Claims:   claimList,
-		Evidence: evidenceByID,
-		Verdicts: verdicts,
+		RunID:          sctx.Run.ID,
+		Commit:         sctx.Run.HeadSHA,
+		Claims:         claimList,
+		Evidence:       evidenceByID,
+		Verdicts:       verdicts,
+		Ledger:         ledger,
+		CoverageReport: coverageReport,
 	})
+}
+
+// loadCoverageForDossier reads the coverage ledger and re-runs the (idempotent)
+// coverage audit so the dossier shows the instrumentation-backfilled account and
+// the machine coverage rate. It is best-effort: any failure yields no coverage
+// section rather than blocking PR creation. The verify step already persisted
+// the backfill corrections, so re-running here only recomputes the report.
+func (s *PRStep) loadCoverageForDossier(sctx *pipeline.StepContext) ([]coverage.LedgerEntry, *coverage.AuditReport) {
+	ledger, err := sctx.DB.GetCoverageEntriesByRun(sctx.Run.ID)
+	if err != nil || len(ledger) == 0 {
+		return nil, nil
+	}
+	p := sctx.Paths
+	if p == nil {
+		return ledger, nil
+	}
+	res, err := covaudit.Run(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, p.EvidenceKeyFile(), sctx.Run.BaseSHA, sctx.Run.HeadSHA)
+	if err != nil {
+		slog.Warn("dossier: coverage audit failed", "error", err)
+		return ledger, nil
+	}
+	report := res.Report
+	return res.Ledger, &report
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a

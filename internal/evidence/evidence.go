@@ -26,6 +26,8 @@ package evidence
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/coverage"
 )
 
 // Provenance levels. See package doc for the trust semantics.
@@ -43,6 +45,12 @@ const (
 const (
 	KindCommandOutput = "command-output"
 	KindFile          = "file"
+	// KindCoverage marks a captured instrumentation run: command output plus the
+	// structured, parsed coverage data that backfills the coverage ledger's
+	// ground truth (design §3.2/§4.4c). The parsed data rides inline in the
+	// signed entry (Entry.Coverage), so the coverage numbers are cryptographically
+	// bound to the run that produced them.
+	KindCoverage = "coverage"
 )
 
 // Entry is a single manifest record. It mirrors design §3.3 minus the
@@ -65,8 +73,13 @@ type Entry struct {
 	EnvFingerprint map[string]string `json:"env_fingerprint,omitempty"`
 	Paths          []string          `json:"paths,omitempty"`
 	Claims         []string          `json:"claims,omitempty"`
-	CreatedAt      int64             `json:"created_at"`
-	Signature      string            `json:"signature,omitempty"`
+	// Coverage carries parsed instrumentation data for KindCoverage entries. It
+	// is part of the canonical signed bytes (sign.go marshals the whole entry),
+	// so the coverage ground truth cannot be altered without breaking
+	// verification. Nil for non-coverage kinds.
+	Coverage  *coverage.CoverageData `json:"coverage,omitempty"`
+	CreatedAt int64                  `json:"created_at"`
+	Signature string                 `json:"signature,omitempty"`
 }
 
 // evidenceRootRel is the in-repo directory (relative to the worktree root) that
