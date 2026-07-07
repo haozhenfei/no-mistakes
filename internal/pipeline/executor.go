@@ -282,6 +282,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Agent:        stepAgent,
 		Config:       e.config,
 		DB:           e.db,
+		Paths:        e.paths,
 		StepResultID: sr.ID,
 		UserIntent:   userIntent,
 		Log:          writeLog,

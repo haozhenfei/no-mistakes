@@ -10,7 +10,9 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -227,7 +229,66 @@ func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext) (string, strin
 
 	pipelineMD, riskLine := BuildPipelineSummary(steps, rounds)
 	testingMD := BuildTestingSummaryForPR(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir)
+
+	// Prepend the deterministic evidence dossier (verdict banner, claims table,
+	// self-attested section, footnote) so it heads the generated pipeline block.
+	// Signature verification happens here at render time.
+	if dossierMD := s.buildDossierSection(sctx); dossierMD != "" {
+		if pipelineMD == "" {
+			pipelineMD = dossierMD
+		} else {
+			pipelineMD = dossierMD + "\n\n" + pipelineMD
+		}
+	}
 	return pipelineMD, riskLine, testingMD
+}
+
+// buildDossierSection loads claims, verify verdicts, and signed evidence for the
+// run and renders the dossier. Evidence signatures are verified against the key
+// under NM_HOME; entries that fail verification are downgraded to attested and
+// flagged by the renderer. Returns "" on any load failure so a dossier problem
+// never blocks PR creation.
+func (s *PRStep) buildDossierSection(sctx *pipeline.StepContext) string {
+	claimList, err := sctx.DB.GetClaimsByRun(sctx.Run.ID)
+	if err != nil {
+		slog.Warn("dossier: failed to load claims", "error", err)
+		return ""
+	}
+	verdicts, err := sctx.DB.GetVerifyVerdictsByRun(sctx.Run.ID)
+	if err != nil {
+		slog.Warn("dossier: failed to load verify verdicts", "error", err)
+		return ""
+	}
+	if len(claimList) == 0 && len(verdicts) == 0 {
+		return ""
+	}
+
+	evidenceByID := map[string]evidence.LoadedEntry{}
+	p := sctx.Paths
+	if p == nil {
+		if resolved, perr := paths.New(); perr == nil {
+			p = resolved
+		}
+	}
+	if p != nil {
+		if key, kerr := evidence.LoadOrCreateKey(p.EvidenceKeyFile()); kerr == nil {
+			if loaded, lerr := evidence.LoadAll(sctx.WorkDir, key); lerr == nil {
+				for _, e := range loaded {
+					evidenceByID[e.ID] = e
+				}
+			} else {
+				slog.Warn("dossier: failed to load evidence", "error", lerr)
+			}
+		}
+	}
+
+	return BuildDossier(DossierData{
+		RunID:    sctx.Run.ID,
+		Commit:   sctx.Run.HeadSHA,
+		Claims:   claimList,
+		Evidence: evidenceByID,
+		Verdicts: verdicts,
+	})
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a

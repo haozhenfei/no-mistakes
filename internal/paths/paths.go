@@ -42,6 +42,13 @@ func (p *Paths) ConfigFile() string { return filepath.Join(p.root, "config.yaml"
 // ever running startup recovery or binding the socket concurrently for the
 // same root.
 func (p *Paths) LockFile() string { return filepath.Join(p.root, "daemon.lock") }
+
+// EvidenceKeyFile is the HMAC key that signs evidence manifest entries. It
+// lives under NM_HOME — the daemon's private state root, OUTSIDE any repo
+// worktree — so an agent that can write into a worktree cannot forge a
+// captured-evidence signature by rewriting the key (design §3.1). It is created
+// on first use with 0600 permissions.
+func (p *Paths) EvidenceKeyFile() string { return filepath.Join(p.root, "evidence.key") }
 func (p *Paths) UpdateCheckFile() string {
 	return filepath.Join(p.root, "update-check.json")
 }
