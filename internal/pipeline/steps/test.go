@@ -14,6 +14,18 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// evidenceVaultGuidance instructs the test agent to produce its end-to-end
+// evidence through the trusted Evidence Vault collector and to register claims
+// bound to the resulting manifest IDs. Only signed manifest entries and their
+// registered claims are the record the verify gate adjudicates and the dossier
+// renders — free text in `tested[]` no longer carries claim status.
+const evidenceVaultGuidance = `- Produce your end-to-end evidence through the Evidence Vault so it is signed and trustworthy:
+  - Run behavior-demonstrating commands via ` + "`no-mistakes evidence exec --label \"<what it shows>\" -- <command> [args...]`" + ` — this captures the exact command, output, and exit code as signed "captured" evidence and prints an evidence ID (ev-XXXX).
+  - Register reviewer-visible files (screenshots, rendered HTML) via ` + "`no-mistakes evidence attach --file <path> --label \"<what it shows>\"`" + ` — these are recorded as "attested" evidence and also print an evidence ID.
+- For each intended behavior, register a claim bound to the evidence that proves it: ` + "`no-mistakes claim add --text \"<what now works>\" --kind behavior|regression-fixed|rule-compliance|non-goal --evidence <ev-id,...>`" + `.
+- A claim with no evidence is demoted to a self-attested note and can never appear in the review conclusions, so always cite the evidence IDs you captured.
+- The signed manifest entries and registered claims are the record the verification gate checks; free-text in "tested" is a convenience summary only and does not stand in for captured evidence.`
+
 // TestStep runs baseline tests, gathers evidence for user intent, and optionally asks the agent to fix failures.
 type TestStep struct{}
 
@@ -135,6 +147,7 @@ Previous test findings to address:
 		if evidenceLocation.StoreInRepo {
 			evidenceGuidance = fmt.Sprintf("- Write new evidence files into this in-repo evidence directory; it is committed and pushed automatically, so artifacts render directly on the PR: %s", evidenceDir)
 		}
+		evidenceGuidance += "\n" + evidenceVaultGuidance
 		configuredTestCommand := ""
 		if testCmd != "" {
 			configuredTestCommand = fmt.Sprintf("\nConfigured test command already ran successfully as baseline: `%s`\n", testCmd)
