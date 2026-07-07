@@ -64,6 +64,30 @@ CREATE TABLE IF NOT EXISTS intent_cache (
     session_id  TEXT NOT NULL,
     created_at  INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS claims (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step          TEXT NOT NULL,
+    text          TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    evidence_json TEXT,
+    hunks_json    TEXT,
+    verdict       TEXT,
+    verdict_by    TEXT,
+    created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS verify_verdicts (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    claim_id      TEXT NOT NULL,
+    verdict       TEXT NOT NULL,
+    rationale     TEXT,
+    evidence_json TEXT,
+    votes_json    TEXT,
+    created_at    INTEGER NOT NULL
+);
 `
 
 // migrationStatements hold additive schema changes applied to databases that

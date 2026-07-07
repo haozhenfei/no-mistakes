@@ -93,6 +93,8 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newStatsCmd())
 	cmd.AddCommand(newDoctorCmd())
 	cmd.AddCommand(newAxiCmd())
+	cmd.AddCommand(newEvidenceCmd())
+	cmd.AddCommand(newClaimCmd())
 
 	return cmd
 }
