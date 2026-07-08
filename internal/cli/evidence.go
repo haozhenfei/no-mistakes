@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/coverage"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/spf13/cobra"
 )
@@ -30,6 +31,7 @@ func newEvidenceCmd() *cobra.Command {
 		SilenceUsage:  true,
 	}
 	cmd.AddCommand(newEvidenceExecCmd())
+	cmd.AddCommand(newEvidenceCoverageCmd())
 	cmd.AddCommand(newEvidenceAttachCmd())
 	cmd.AddCommand(newEvidenceListCmd())
 	return cmd
@@ -83,6 +85,76 @@ func newEvidenceExecCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "human-readable evidence label (required)")
+	cmd.Flags().StringSliceVar(&claimIDs, "claim", nil, "claim IDs this evidence supports")
+	return cmd
+}
+
+func newEvidenceCoverageCmd() *cobra.Command {
+	var label, format, coverProfile string
+	var claimIDs []string
+	cmd := &cobra.Command{
+		Use:   "coverage --label <label> --format <go|lcov> --cover-profile <path> -- <cmd> [args...]",
+		Short: "Run an instrumented command and record its line-level coverage as captured evidence",
+		Long: "Instrumentation variant of `evidence exec`. Run the command that produces a\n" +
+			"coverage profile (e.g. `go test -coverprofile=cover.out ./...`), point\n" +
+			"--cover-profile at that file, and the collector parses it into signed,\n" +
+			"line-level coverage data. That data is the ground truth the coverage ledger\n" +
+			"backfills from: a hunk can only be marked runtime-verified if an\n" +
+			"instrumentation run actually executed it. Unsupported languages record the\n" +
+			"run without coverage rather than fabricating it.",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(label) == "" {
+				return fmt.Errorf("--label is required")
+			}
+			if strings.TrimSpace(coverProfile) == "" {
+				return fmt.Errorf("--cover-profile is required (the path your command writes its profile to)")
+			}
+			if format == "" {
+				format = coverage.FormatGo
+			}
+			c, err := openInRunContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer c.close()
+			store, err := openEvidenceStore(c)
+			if err != nil {
+				return err
+			}
+			entry, execErr := store.Coverage(cmd.Context(), evidence.CoverageOpts{
+				Label:        label,
+				Argv:         args,
+				Format:       format,
+				Dir:          c.repoRoot,
+				RepoRoot:     c.repoRoot,
+				CoverProfile: coverProfile,
+				Commit:       c.headSHA,
+				RunID:        c.runID(),
+				Branch:       c.branch,
+				Claims:       claimIDs,
+			})
+			// A parse/degradation error still yields a recorded entry; surface the
+			// degradation to the agent but do not fail the command if the run was
+			// captured.
+			if entry.ID == "" {
+				return execErr
+			}
+			files := 0
+			if entry.Coverage != nil {
+				files = len(entry.Coverage.Files)
+			}
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "%s\tcoverage\texit=%d\tfiles=%d\t%s\n", entry.ID, entry.ExitCode, files, entry.Label)
+			if execErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v\n", execErr)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&label, "label", "", "human-readable evidence label (required)")
+	cmd.Flags().StringVar(&format, "format", "", "coverage format: go|lcov (default go)")
+	cmd.Flags().StringVar(&coverProfile, "cover-profile", "", "path the command writes its coverage profile to (required)")
 	cmd.Flags().StringSliceVar(&claimIDs, "claim", nil, "claim IDs this evidence supports")
 	return cmd
 }

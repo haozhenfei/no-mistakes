@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/claims"
+	"github.com/kunchenguid/no-mistakes/internal/coverage"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 )
@@ -160,4 +161,67 @@ func firstTableRow(section string) string {
 		}
 	}
 	return section
+}
+
+func TestBuildDossier_CoverageLedgerSection(t *testing.T) {
+	rate := coverage.AuditReport{
+		TotalHunks:      3,
+		RuntimeVerified: 1,
+		Attested:        1,
+		Unverified:      1,
+		CoverageRate:    1.0 / 3.0,
+		Issues: []coverage.AuditIssue{
+			{Kind: "weak-static", Hunk: coverage.Hunk{File: "conf.go", Start: 5, End: 6}, Detail: "no captured executable static evidence"},
+		},
+	}
+	data := DossierData{
+		RunID:  "run-1",
+		Commit: "abcdef123456",
+		Ledger: []coverage.LedgerEntry{
+			{File: "calc.go", StartLine: 5, EndLine: 7, State: coverage.StateRuntimeVerified, Evidence: []string{"ev-cov"}},
+			{File: "calc.go", StartLine: 10, EndLine: 13, State: coverage.StateAttested, Reason: "no coverage intersects"},
+			{File: "conf.go", StartLine: 5, EndLine: 6, State: coverage.StateUnverified, Reason: "config only"},
+		},
+		CoverageReport: &rate,
+	}
+	out := BuildDossier(data)
+
+	if !strings.Contains(out, "### Coverage ledger") {
+		t.Fatalf("expected coverage ledger section, got:\n%s", out)
+	}
+	// The banner shows the instrumentation-backfilled runtime coverage count.
+	if !strings.Contains(out, "runtime coverage") || !strings.Contains(out, "1/3") {
+		t.Fatalf("expected runtime-coverage banner 1/3, got:\n%s", out)
+	}
+	// Runtime-verified rows carry the machine-backfill (captured) marker.
+	if !strings.Contains(out, markerCaptured+" runtime-verified") {
+		t.Fatalf("expected runtime-verified marker, got:\n%s", out)
+	}
+	// Unverified rows must show their reason.
+	if !strings.Contains(out, "config only") {
+		t.Fatalf("expected unverified reason, got:\n%s", out)
+	}
+	// Audit issues surface beneath the table.
+	if !strings.Contains(out, "weak-static") {
+		t.Fatalf("expected audit issue, got:\n%s", out)
+	}
+}
+
+func TestBuildDossier_CoverageOnlyStillRenders(t *testing.T) {
+	// A run with no claims but a coverage ledger still produces a dossier.
+	data := DossierData{
+		RunID:  "run-1",
+		Commit: "abc",
+		Ledger: []coverage.LedgerEntry{
+			{File: "x.go", StartLine: 1, EndLine: 2, State: coverage.StateUnverified, Reason: "no gate recorded verification"},
+		},
+		CoverageReport: &coverage.AuditReport{TotalHunks: 1, Unverified: 1},
+	}
+	out := BuildDossier(data)
+	if out == "" {
+		t.Fatal("expected a dossier for a coverage-only run")
+	}
+	if !strings.Contains(out, "### Coverage ledger") {
+		t.Fatalf("expected coverage ledger, got:\n%s", out)
+	}
 }

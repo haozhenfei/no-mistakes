@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/claims"
+	"github.com/kunchenguid/no-mistakes/internal/coverage"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 )
@@ -20,6 +21,12 @@ type DossierData struct {
 	Claims   []claims.Claim
 	Evidence map[string]evidence.LoadedEntry // keyed by evidence id
 	Verdicts []db.VerifyVerdict
+	// Ledger is the per-hunk coverage ledger (design §5), rendered as the
+	// coverage-account section. CoverageReport is the machine audit summary
+	// (§4.4c): runtime-coverage rate and uncovered list. Both may be zero-valued
+	// when no coverage was recorded.
+	Ledger         []coverage.LedgerEntry
+	CoverageReport *coverage.AuditReport
 }
 
 // Provenance markers. 🔒 attests COLLECTION AUTHENTICITY ONLY (the output really
@@ -37,17 +44,25 @@ const (
 func BuildDossier(d DossierData) string {
 	conclusions, selfAttested := splitClaims(d.Claims)
 	refutedFindings := refutedFindingVerdicts(d.Verdicts)
-	if len(conclusions) == 0 && len(selfAttested) == 0 && len(refutedFindings) == 0 {
+	if len(conclusions) == 0 && len(selfAttested) == 0 && len(refutedFindings) == 0 && len(d.Ledger) == 0 {
 		return ""
 	}
 
 	var b strings.Builder
 	b.WriteString("## Evidence Dossier\n\n")
 	b.WriteString(dossierBanner(conclusions, refutedFindings))
+	if line := dossierCoverageBanner(d); line != "" {
+		b.WriteString("\n")
+		b.WriteString(line)
+	}
 	b.WriteString("\n\n")
 
 	if len(conclusions) > 0 {
 		b.WriteString(dossierConclusionsTable(d, conclusions))
+		b.WriteString("\n")
+	}
+	if cov := dossierCoverageSection(d); cov != "" {
+		b.WriteString(cov)
 		b.WriteString("\n")
 	}
 	if len(refutedFindings) > 0 {
@@ -112,6 +127,88 @@ func dossierBanner(conclusions []claims.Claim, refutedFindings []db.VerifyVerdic
 		"%s **%s** — %d claim(s) survived adversarial verification, %d plausible, %d refuted.",
 		emoji, verdict, confirmed, plausible, refuted,
 	)
+}
+
+// dossierCoverageBanner renders the runtime-coverage line for the conclusion
+// banner (design §7 item 1: "改动 hunk 运行时覆盖 41/47"). The number is the
+// instrumentation-backfilled count, not an agent tally — a machine fact.
+func dossierCoverageBanner(d DossierData) string {
+	r := d.CoverageReport
+	if r == nil || r.TotalHunks == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"📊 Changed-hunk runtime coverage (instrumentation-backfilled): %d/%d (%.0f%%); %d static, %d attested, %d unverified.",
+		r.RuntimeVerified, r.TotalHunks, r.CoverageRate*100, r.StaticVerified, r.Attested, r.Unverified,
+	)
+}
+
+// coverageStateMarker maps a ledger state to a display cell. Runtime-verified
+// carries the machine-backfill mark 🔒 because it is instrumentation-backed;
+// the others are not runtime-executed and say so plainly.
+func coverageStateMarker(state string) string {
+	switch state {
+	case coverage.StateRuntimeVerified:
+		return markerCaptured + " runtime-verified"
+	case coverage.StateStaticVerified:
+		return "🧩 static-verified"
+	case coverage.StateAttested:
+		return markerAttested + " attested"
+	default:
+		return "○ unverified"
+	}
+}
+
+// dossierCoverageSection renders the coverage ledger (design §7 item 3): a hunk
+// table with the four states, machine-backfill marks on runtime-verified rows,
+// and a required reason on every unverified row. Audit issues are surfaced
+// beneath the table so a reviewer sees exactly which changed code nobody ran.
+func dossierCoverageSection(d DossierData) string {
+	if len(d.Ledger) == 0 {
+		return ""
+	}
+	ledger := append([]coverage.LedgerEntry(nil), d.Ledger...)
+	sort.Slice(ledger, func(i, j int) bool {
+		if ledger[i].File != ledger[j].File {
+			return ledger[i].File < ledger[j].File
+		}
+		return ledger[i].StartLine < ledger[j].StartLine
+	})
+
+	var b strings.Builder
+	b.WriteString("### Coverage ledger\n\n")
+	b.WriteString("| Hunk | State | Reason / evidence |\n")
+	b.WriteString("| --- | --- | --- |\n")
+	for _, e := range ledger {
+		detail := e.Reason
+		if detail == "" && len(e.Evidence) > 0 {
+			detail = "evidence: " + strings.Join(e.Evidence, ", ")
+		}
+		if detail == "" {
+			detail = "—"
+		}
+		b.WriteString(fmt.Sprintf(
+			"| %s:%d-%d | %s | %s |\n",
+			mdCell(e.File), e.StartLine, e.EndLine, coverageStateMarker(e.State), mdCell(detail),
+		))
+	}
+	if issues := dossierCoverageIssues(d); issues != "" {
+		b.WriteString("\n")
+		b.WriteString(issues)
+	}
+	return b.String()
+}
+
+func dossierCoverageIssues(d DossierData) string {
+	if d.CoverageReport == nil || len(d.CoverageReport.Issues) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("**Coverage audit issues:**\n\n")
+	for _, is := range d.CoverageReport.Issues {
+		b.WriteString(fmt.Sprintf("- ⚠️ [%s] %s:%d-%d — %s\n", is.Kind, mdCell(is.Hunk.File), is.Hunk.Start, is.Hunk.End, mdCell(is.Detail)))
+	}
+	return b.String()
 }
 
 func dossierConclusionsTable(d DossierData, conclusions []claims.Claim) string {
