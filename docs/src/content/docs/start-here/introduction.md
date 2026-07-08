@@ -51,7 +51,7 @@ flowchart LR
   gate --> hook["post-receive hook"]
   hook --> daemon["Daemon"]
   daemon --> worktree["Disposable worktree"]
-  worktree --> pipeline["intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci"]
+  worktree --> pipeline["intent -> rebase -> review -> test -> qa -> verify -> document -> lint -> push -> pr -> ci"]
   pipeline --> target["Push target"]
 ```
 
@@ -69,7 +69,7 @@ When a branch passes the gate, it means:
 
 ## What you get
 
-- A fixed, opinionated pipeline: `intent → rebase → review → test → document → lint → push → pr → ci`. Order is not configurable; what each step runs is.
+- A fixed, opinionated pipeline: `intent → rebase → review → test → qa → verify → document → lint → push → pr → ci`. Order is not configurable; what each step runs is.
 - Choice of agent: `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, or `acp:<target>` via `acpx`, with per-repo override and ordered fallbacks.
 - A TUI to watch, approve, fix, skip, or abort any step.
 - A `/no-mistakes` agent skill so a coding agent can do a task and gate it, or gate existing committed work, backed by a non-interactive `no-mistakes axi` interface.

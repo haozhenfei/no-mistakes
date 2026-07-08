@@ -6,7 +6,7 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → rebase → review → test → qa → verify → document → lint → push → pr → ci
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
@@ -19,7 +19,7 @@ Configured shell commands and one-shot agent subprocesses are scoped to their st
 ## Intent
 
 Uses agent-supplied intent when a run provides it, otherwise infers the author's intent from recent local Claude Code, Codex, OpenCode, Rovo Dev, Pi, or GitHub Copilot CLI transcripts.
-This is best-effort context, and when available it is included in rebase fixes, review checks and fixes, test detection, evidence validation, and fixes, documentation checks and fixes, lint detection and fixes, CI auto-fixes, and PR drafting.
+This is best-effort context, and when available it is included in rebase fixes, review checks and fixes, test detection, QA validation and fixes, evidence verification and fixes, documentation checks and fixes, lint detection and fixes, CI auto-fixes, and PR drafting.
 
 **Behavior:**
 - Uses run-supplied intent verbatim and skips transcript-based inference, even when `intent.enabled` is false
@@ -92,6 +92,41 @@ Runs baseline tests and gathers evidence for the intended behavior.
 
 **Default auto-fix limit:** `3`.
 
+## QA
+
+Runs behavior-focused QA after baseline tests and before verification.
+
+**Behavior:**
+- Asks the agent to follow the four-stage QA protocol: reachability triage, machine-readable scenario/use-case ledger, execution with captured evidence, and evidence-backed case results
+- Treats deterministic reachability as deterministic only when the environment can actually check it, such as a command, probe, or captured run; data/account reachability and scenario semantics remain semantic judgments
+- Persists behavior evidence through the existing Evidence Vault, claims, and coverage-ledger commands rather than a parallel QA store
+- Requires runtime-pass QA cases to have captured evidence IDs and coverage-ledger support; code-level reasoning alone does not count as a runtime pass
+- Records assessed changed hunks in the coverage ledger as `runtime-verified`, `static-verified`, `attested`, or `unverified`, so the later verify step can backfill and audit the ledger against instrumentation truth
+- Reports missing runtime evidence, unreachable cases, or failed behavior checks as actionable findings
+
+**Approval:** QA findings with `action: ask-user` pause for approval. `action: auto-fix` findings stay eligible for the fix loop. `action: no-op` findings are informational only.
+
+**Auto-fix:** the agent receives previous QA findings plus any per-finding user notes, any selected user-authored findings, and sanitized prior-round history. Fix commits use `no-mistakes(qa): <summary>`.
+
+**Default auto-fix limit:** `3`.
+
+## Verify
+
+Adversarially verifies evidence-bound claims and audits the coverage ledger.
+
+**Behavior:**
+- Loads signed evidence and registered claims from the run
+- Uses independent skeptic prompts to adjudicate evidence-bound claims as `CONFIRMED`, `PLAUSIBLE`, or `REFUTED`
+- Runs the coverage audit over the changed hunks, coverage ledger, and captured instrumentation evidence
+- Backfills runtime truth from captured coverage, downgrading unsupported `runtime-verified` labels and inserting `unverified` rows for changed hunks no gate recorded
+- Surfaces coverage audit issues as non-parking findings; REFUTED claims are the verification failures that park the run
+
+**Approval:** required when verify REFUTES a claim. Coverage-audit warnings are recorded for routing and dossier visibility but do not currently park the run by themselves.
+
+**Auto-fix:** the agent receives the refutations and can fix code, correct claims, or recapture evidence inside the verify step. Fix commits use `no-mistakes(verify): <summary>`.
+
+**Default auto-fix limit:** `0`.
+
 ## Document
 
 Updates matching documentation for code changes and reports only unresolved gaps.
@@ -146,7 +181,7 @@ Pushes the validated branch to the configured push target.
 A remote branch can move without being rejected when all remote commits are already represented in the validated head, or when a run is intentionally rewriting history it already knew about.
 Any other out-of-band commit stops the push instead of being overwritten.
 
-This step never requires approval - it runs automatically after review, test, document, and lint pass.
+This step never requires approval - it runs automatically after review, test, qa, verify, document, and lint pass.
 
 ## PR
 
