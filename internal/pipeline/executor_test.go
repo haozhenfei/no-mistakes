@@ -236,6 +236,27 @@ func TestExecutor_FailedStepRecordsDuration(t *testing.T) {
 	}
 }
 
+func TestExecutor_FastCompletedStepRecordsPositiveDuration(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	exec := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepVerify)}, nil)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	dbSteps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	if dbSteps[0].DurationMS == nil {
+		t.Fatal("duration_ms = nil, want positive value")
+	}
+	if *dbSteps[0].DurationMS <= 0 {
+		t.Fatalf("duration_ms = %d, want positive value", *dbSteps[0].DurationMS)
+	}
+}
+
 func TestExecutor_EmptySteps(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

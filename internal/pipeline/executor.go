@@ -304,7 +304,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	for {
 		outcome, err := step.Execute(sctx)
 		roundNum++
-		roundDuration := time.Since(phaseStart).Milliseconds()
+		roundDuration := elapsedMillis(phaseStart)
 		if err != nil {
 			durationMS := executionMS + roundDuration
 			// Persist the failure reason to the step's own log file. The error
@@ -367,7 +367,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				autoFixAttempts++
 				telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
 				slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
-				executionMS += time.Since(phaseStart).Milliseconds()
+				executionMS += elapsedMillis(phaseStart)
 				fixCount := findingsCount(fixableFindings)
 				writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
 				if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusFixing); dbErr != nil {
@@ -399,7 +399,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 
 		// Freeze execution timer before entering approval wait.
-		executionMS += time.Since(phaseStart).Milliseconds()
+		executionMS += elapsedMillis(phaseStart)
 
 		// Determine approval status: fix_review after a fix cycle, awaiting_approval otherwise
 		approvalStatus := types.StepStatusAwaitingApproval
@@ -522,7 +522,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 done:
 	// Mark step completed with execution-only timing.
-	durationMS := executionMS + time.Since(phaseStart).Milliseconds()
+	durationMS := executionMS + elapsedMillis(phaseStart)
 	if durationOverrideMS > 0 {
 		durationMS = durationOverrideMS
 	}
@@ -535,6 +535,14 @@ done:
 	}
 	e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", "", &durationMS)
 	return skipRemaining, nil
+}
+
+func elapsedMillis(start time.Time) int64 {
+	ms := time.Since(start).Milliseconds()
+	if ms == 0 {
+		return 1
+	}
+	return ms
 }
 
 func roundInsertID(_ string, inserted *db.StepRound, err error) string {
