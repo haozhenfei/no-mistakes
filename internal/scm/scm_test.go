@@ -24,6 +24,11 @@ func TestDetectProvider(t *testing.T) {
 		{"https://dev.azure.com/org/project/_git/repo", ProviderAzureDevOps},
 		{"git@ssh.dev.azure.com:v3/org/project/repo", ProviderAzureDevOps},
 		{"https://org.visualstudio.com/project/_git/repo", ProviderAzureDevOps},
+		{"https://code.byted.org/owner/repo.git", ProviderCodebase},
+		{"git@code.byted.org:owner/repo.git", ProviderCodebase},
+		{"https://code-tx.byted.org/owner/repo.git", ProviderCodebase},
+		{"git@code-tx.byted.org:owner/repo.git", ProviderCodebase},
+		{"https://code.byted.org/group/sub/repo.git", ProviderCodebase},
 		{"https://example.com/user/repo.git", ProviderUnknown},
 	}
 

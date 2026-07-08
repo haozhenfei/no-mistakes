@@ -17,6 +17,7 @@ const (
 	ProviderGitLab      Provider = "gitlab"
 	ProviderBitbucket   Provider = "bitbucket"
 	ProviderAzureDevOps Provider = "azuredevops"
+	ProviderCodebase    Provider = "codebase"
 	ProviderUnknown     Provider = "unknown"
 )
 
@@ -25,6 +26,10 @@ func DetectProvider(url string) Provider {
 	switch {
 	case strings.Contains(lower, "github.com"):
 		return ProviderGitHub
+	case strings.Contains(lower, "code.byted.org") || strings.Contains(lower, "code-tx.byted.org"):
+		// ByteDance Codebase. Matched before the generic self-hosted GitLab
+		// fallback so a Codebase host is never mistaken for a GitLab instance.
+		return ProviderCodebase
 	case strings.Contains(lower, "gitlab.com") || strings.Contains(lower, "gitlab."):
 		return ProviderGitLab
 	case strings.Contains(lower, "bitbucket.org"):
@@ -157,6 +162,8 @@ func (p Provider) CLIName() string {
 		return "bb"
 	case ProviderAzureDevOps:
 		return "az"
+	case ProviderCodebase:
+		return "bytedcli"
 	default:
 		return ""
 	}
@@ -172,6 +179,8 @@ func (p Provider) AuthCheckCommand() []string {
 		return []string{"bb", "profile", "which"}
 	case ProviderAzureDevOps:
 		return []string{"az", "account", "show"}
+	case ProviderCodebase:
+		return []string{"bytedcli", "auth", "status"}
 	default:
 		return nil
 	}

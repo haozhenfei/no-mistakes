@@ -59,6 +59,12 @@ func newDoctorCmd() *cobra.Command {
 					ok("az            ", "ok")
 				}
 
+				if _, err := exec.LookPath("bytedcli"); err != nil {
+					warn("bytedcli      ", "not found "+sDim.Render("(optional, needed for Codebase PR/CI)"))
+				} else {
+					ok("bytedcli      ", "ok")
+				}
+
 				p, err := paths.New()
 				if err != nil {
 					fail("data directory", fmt.Sprintf("error resolving paths (%v)", err))
