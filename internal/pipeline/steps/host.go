@@ -9,6 +9,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/azuredevops"
+	"github.com/kunchenguid/no-mistakes/internal/scm/codebase"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/scm/gitlab"
 )
@@ -90,6 +91,23 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 			return nil, "could not resolve Azure DevOps organization, project, and repository from the remote URL"
 		}
 		return azuredevops.New(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, org, project, repo), ""
+	case scm.ProviderCodebase:
+		if sctx.Repo.ForkURL != "" {
+			// Fork MR routing for Codebase is intentionally not half-wired,
+			// mirroring GitLab/Bitbucket/Azure DevOps: the push step may use
+			// fork_url, but MR creation must skip until cross-repository routing
+			// is implemented end to end.
+			return nil, "fork PR routing for Codebase is not implemented"
+		}
+		host := scm.ExtractHost(sctx.Repo.UpstreamURL)
+		repo := codebase.RepoSlug(sctx.Repo.UpstreamURL)
+		if repo == "" && sctx.Run.PRURL != nil {
+			repo = codebase.RepoSlug(*sctx.Run.PRURL)
+			if host == "" {
+				host = scm.ExtractHost(*sctx.Run.PRURL)
+			}
+		}
+		return codebase.New(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, repo), ""
 	default:
 		return nil, fmt.Sprintf("provider %s is not supported yet", provider)
 	}

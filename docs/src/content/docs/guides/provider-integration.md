@@ -1,11 +1,12 @@
 ---
 title: Provider Integration
-description: Set up GitHub, GitLab, Bitbucket Cloud, or Azure DevOps for PR creation and CI monitoring.
+description: Set up GitHub, GitLab, Bitbucket Cloud, Azure DevOps, or ByteDance Codebase for PR creation and CI monitoring.
 ---
 
-The PR and CI steps need to talk to your git host. Four hosts are supported:
-GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), and Azure DevOps
-(`dev.azure.com` and legacy `*.visualstudio.com`). Everything else
+The PR and CI steps need to talk to your git host. Five hosts are supported:
+GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), Azure DevOps
+(`dev.azure.com` and legacy `*.visualstudio.com`), and ByteDance Codebase
+(`code.byted.org` and `code-tx.byted.org`). Everything else
 short-circuits the PR and CI steps with `skipped`.
 
 Provider integration is optional for the local gate. You only need it for the
@@ -25,13 +26,13 @@ What you do not get is PR automation and CI monitoring.
 
 ## What each step needs
 
-| Step | GitHub | GitLab | Bitbucket Cloud | Azure DevOps |
-|---|---|---|---|---|
-| **PR** (create/update) | `gh` CLI, authenticated | `glab` CLI, authenticated | `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated |
-| **CI** (polling, auto-fix) | `gh` CLI | `glab` CLI | same env vars | `az` CLI |
-| **Merge conflict auto-fix** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
-| **Mergeability polling** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
-| **Failed check log fetching** | `gh` CLI | `glab` CLI | supported | not yet |
+| Step | GitHub | GitLab | Bitbucket Cloud | Azure DevOps | Codebase |
+|---|---|---|---|---|---|
+| **PR** (create/update) | `gh` CLI, authenticated | `glab` CLI, authenticated | `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated | `bytedcli` CLI, authenticated |
+| **CI** (polling, auto-fix) | `gh` CLI | `glab` CLI | same env vars | `az` CLI | `bytedcli` CLI |
+| **Merge conflict auto-fix** | `gh` CLI | `glab` CLI | not supported | `az` CLI | `bytedcli` CLI |
+| **Mergeability polling** | `gh` CLI | `glab` CLI | not supported | `az` CLI | `bytedcli` CLI |
+| **Failed check log fetching** | `gh` CLI | `glab` CLI | supported | not yet | `bytedcli` CLI |
 
 ## What changes when provider wiring is present
 
@@ -182,6 +183,40 @@ well as their SSH forms (`git@ssh.dev.azure.com:v3/...`).
 - Failed check log fetching for the CI auto-fix step (the `az` CLI has no
   first-class build-log command)
 - Fork PR routing (same as GitLab and Bitbucket)
+
+## ByteDance Codebase
+
+ByteDance Codebase (`code.byted.org` and `code-tx.byted.org`) uses the
+`bytedcli` CLI. Install and authenticate it:
+
+```sh
+# Install globally
+NPM_CONFIG_REGISTRY=http://bnpm.byted.org npm install -g @bytedance-dev/bytedcli@latest
+
+# Confirm authentication (ByteCloud SSO)
+bytedcli --json auth status
+```
+
+`no-mistakes doctor` also checks for `bytedcli` availability. Both HTTPS
+(`https://code.byted.org/owner/repo.git`) and SSH
+(`git@code.byted.org:owner/repo.git`) remotes are detected, including nested
+namespaces (`owner/group/repo`). The repository slug is passed to `bytedcli`
+via `-R`, so daemon-run commands do not depend on the daemon's working
+directory.
+
+**What you get:**
+
+- MR creation and update (`bytedcli codebase mr create` / `mr update`)
+- CI status, mergeability, and check runs polled in one call
+  (`bytedcli codebase mr status`) until the MR is merged, closed, or the
+  configured `ci_timeout` idle window elapses
+- Merge-conflict polling and auto-fix
+- Failed check log fetching (`bytedcli codebase checks log --check-run-id`)
+  for the CI auto-fix step
+
+**What you don't get (yet):**
+
+- Fork MR routing (same as GitLab, Bitbucket, and Azure DevOps)
 
 ## Self-hosted GitHub/GitLab
 
