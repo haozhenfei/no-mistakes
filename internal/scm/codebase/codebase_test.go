@@ -225,6 +225,45 @@ func TestCreatePRUsesReturnedURLWhenPresent(t *testing.T) {
 	}
 }
 
+// realMRCreateStdout is a verbatim (abridged) capture of what
+// `bytedcli --json codebase mr create` actually printed when it opened MR 6951
+// on code.byted.org/obric/coze-monorepo. The wrapper key is CapitalCase
+// (data.MergeRequest), unlike `mr list`/`mr get`/`mr status`, which all nest
+// the payload under a snake_case key. Only the commit/branch blobs are elided;
+// every key name and its casing is preserved exactly as emitted.
+const realMRCreateStdout = `{"status":"success","data":{"MergeRequest":{` +
+	`"Id":"784897989989491","Number":6951,"Status":"open",` +
+	`"SourceRepoId":"978977","TargetRepoId":"978977",` +
+	`"SourceBranchName":"fm/coze-obj-rename-fix-y3","TargetBranchName":"release/20260713",` +
+	`"Title":"fix(storage): inline rename row color","Description":"## Intent\n\n..."` +
+	`}}}` + "\n"
+
+// The CapitalCase wrapper used to parse as a zero-value struct: Go's
+// case-insensitive field match does not bridge `merge_request` and
+// `MergeRequest` because of the underscore. CreatePR therefore reported a
+// successfully created MR as a hard failure, which failed the run and meant the
+// `ci` step never executed.
+func TestCreatePRParsesCapitalCaseMergeRequestWrapper(t *testing.T) {
+	t.Parallel()
+
+	host := New(codebaseTestCmdFactory(map[string]codebaseTestResponse{
+		"bytedcli --json codebase mr create --head fm/coze-obj-rename-fix-y3 --base release/20260713 --title t --body b -R obric/coze-monorepo": {
+			stdout: realMRCreateStdout,
+		},
+	}), nil, "code.byted.org", "obric/coze-monorepo")
+
+	pr, err := host.CreatePR(context.Background(), "fm/coze-obj-rename-fix-y3", "release/20260713", scm.PRContent{Title: "t", Body: "b"})
+	if err != nil {
+		t.Fatalf("CreatePR() error = %v, want the created MR", err)
+	}
+	if pr.Number != "6951" {
+		t.Fatalf("CreatePR() number = %q, want 6951", pr.Number)
+	}
+	if pr.URL != "https://code.byted.org/obric/coze-monorepo/merge_requests/6951" {
+		t.Fatalf("CreatePR() URL = %q, want synthesized URL", pr.URL)
+	}
+}
+
 func TestCreatePRReturnsCLIError(t *testing.T) {
 	t.Parallel()
 
