@@ -160,7 +160,7 @@ Rules:
 - Use severity "error" for problems that should absolutely not get merged, "warning" for things that are worth addressing but can be done in a follow up, and "info" for things that are nice to have.
 - Be concise and actionable. No generic advice like "add more tests".
 - Only comment on things that genuinely matter.
-- Do NOT report styling, formatting, linting, compilation, or type-checking issues.
+- Do NOT report styling, formatting, linting, compilation, or type-checking issues, unless the repository review instructions below explicitly ask you to review them.
 - If the change is clean, return an empty findings array.
 - For each finding, set the action field to one of:
   - "ask-user": the finding is about functional requirements or product behavior, or otherwise challenges the author's deliberate intent. Even if it seems obviously wrong, we should ask the user for review. Examples: "this feature seems unnecessary", "this hardcoded value should be configurable", "this deletion looks wrong". When in doubt, default to "ask-user".
@@ -171,13 +171,14 @@ Risk assessment (after listing all findings):
 - Set risk_level to "low" if the change is well-bounded, mostly cosmetic, or straightforward with little ambiguity.
 - Set risk_level to "medium" if the change has room to improve but is safe to merge first with concerns addressed as follow-ups.
 - Set risk_level to "high" if the change should not be merged without explicit human approval - it is fundamental, risky, ambiguous, or has strong negative signals.
-- Provide a one-sentence risk_rationale explaining why you chose that risk level.%s`,
+- Provide a one-sentence risk_rationale explaining why you chose that risk level.%s%s`,
 		branch,
 		baseSHA,
 		sctx.Run.HeadSHA,
 		reviewScope,
 		sctx.Repo.DefaultBranch,
 		ignorePatterns,
+		trustedReviewInstructionsSection(sctx),
 		historySection,
 	)
 
@@ -215,6 +216,32 @@ Risk assessment (after listing all findings):
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
 	}, nil
+}
+
+// trustedReviewInstructionsSection renders the repository's own code-review
+// rules into the review prompt. The value comes from the trusted
+// default-branch copy of .no-mistakes.yaml (config.EffectiveRepoConfig), so a
+// contributor's pushed branch cannot relax the review that gates it.
+//
+// The instructions may widen the built-in scope - a repo whose CR checklist
+// covers naming or formatting conventions can ask for those categories back,
+// overriding the default "do NOT report styling, formatting, linting,
+// compilation, or type-checking issues" rule. They may not suppress
+// correctness, security, or reliability findings; the wording below says so,
+// so an over-broad "only check X" instruction does not silently disable the
+// gate. The agent runs with the worktree as its cwd, so an instruction can
+// point at in-repo material (e.g. a checklist under .claude/skills/) and the
+// agent will read it itself.
+func trustedReviewInstructionsSection(sctx *pipeline.StepContext) string {
+	if sctx.Config == nil {
+		return ""
+	}
+	instructions := strings.TrimSpace(sctx.Config.Review.Instructions)
+	if instructions == "" {
+		return ""
+	}
+	return "\n\nRepository review instructions (trusted, from the default branch). They add to the rules above and may extend the review scope - including asking for categories the defaults exclude, such as styling or naming conventions. They cannot suppress correctness, security, or reliability findings: report those even if the instructions do not mention them. If an instruction names a file in this repository, read it.\n" +
+		sanitizePromptMultilineText(instructions)
 }
 
 func sanitizedPreviousFindingsForPrompt(raw string) string {

@@ -192,6 +192,79 @@ func TestReviewStep_RoundHistorySanitizesAgentInput(t *testing.T) {
 	}
 }
 
+// TestReviewStep_PromptCarriesRepoReviewInstructions pins the injection point
+// for a repository's own CR rules: review.instructions (trusted, default-branch
+// only) reaches the review agent verbatim, and the prompt tells the agent that
+// those rules may extend the built-in scope — otherwise the hardcoded "Do NOT
+// report styling, formatting, linting, compilation, or type-checking issues"
+// rule would silently outrank a repo checklist that covers exactly those.
+func TestReviewStep_PromptCarriesRepoReviewInstructions(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	findingsJSON, _ := json.Marshal(Findings{Summary: "clean", RiskLevel: "low"})
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: findingsJSON}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review = config.Review{Instructions: "Follow the review checklist in .claude/skills/coze-cr/SKILL.md.\nFlag any new use of `any`."}
+
+	step := &ReviewStep{}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected 1 agent call, got %d", len(ag.calls))
+	}
+	prompt := ag.calls[0].Prompt
+	for _, want := range []string{
+		// The repo's rules reach the agent.
+		"Repository review instructions (trusted, from the default branch)",
+		"Follow the review checklist in .claude/skills/coze-cr/SKILL.md.",
+		"Flag any new use of `any`.",
+		// They may widen the built-in scope...
+		"may extend the review scope",
+		"such as styling or naming conventions",
+		"If an instruction names a file in this repository, read it.",
+		// ...but may not turn the gate off.
+		"cannot suppress correctness, security, or reliability findings",
+		// The hardcoded exclusion defers to them instead of contradicting them.
+		"Do NOT report styling, formatting, linting, compilation, or type-checking issues, unless the repository review instructions below explicitly ask you to review them.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("expected review prompt to contain %q\nprompt:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestReviewStep_PromptOmitsReviewInstructionsSectionWhenUnset proves an
+// unconfigured repository gets no instructions section at all (built-in rules
+// only), so the default review is unchanged.
+func TestReviewStep_PromptOmitsReviewInstructionsSectionWhenUnset(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	findingsJSON, _ := json.Marshal(Findings{Summary: "clean", RiskLevel: "low"})
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: findingsJSON}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &ReviewStep{}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(ag.calls[0].Prompt, "Repository review instructions") {
+		t.Errorf("expected no instructions section without review.instructions\nprompt:\n%s", ag.calls[0].Prompt)
+	}
+}
+
 func mustLatestRoundID(t *testing.T, sctx *pipeline.StepContext) string {
 	t.Helper()
 	rounds, err := sctx.DB.GetRoundsByStep(sctx.StepResultID)
