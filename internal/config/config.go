@@ -247,9 +247,17 @@ type TestRaw struct {
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
 // Pointer fields distinguish "not set" (nil) from explicit zero/false values.
+//
+// UploadCmd is a shell command line, so in a repo config it is code-executing
+// and read ONLY from the trusted default-branch copy (see EffectiveRepoConfig).
+// UploadTimeout is inert on its own but bounds that command, so it travels with
+// it. Both are always honored from the global config, which is the machine
+// owner's own file.
 type EvidenceRaw struct {
-	StoreInRepo *bool   `yaml:"store_in_repo"`
-	Dir         *string `yaml:"dir"`
+	StoreInRepo   *bool   `yaml:"store_in_repo"`
+	Dir           *string `yaml:"dir"`
+	UploadCmd     *string `yaml:"upload_cmd"`
+	UploadTimeout *string `yaml:"upload_timeout"`
 }
 
 // Test is the resolved test-step config.
@@ -274,10 +282,25 @@ type Verify struct {
 // test step writes evidence artifacts into Dir (relative to the repo worktree)
 // so they are committed, pushed, and viewable directly on the PR. Otherwise
 // evidence stays in a temporary directory referenced only by local path.
+//
+// UploadCmd is the pluggable upload hook: when set, each evidence file the test
+// step produced is handed to that command, which prints a URL on stdout, and
+// only the URL is written into the PR description. It takes precedence over
+// StoreInRepo (uploaded evidence is never also committed into the branch), so
+// binaries stay out of git history. UploadTimeout bounds one invocation of the
+// hook; see steps.uploadEvidenceArtifacts for the full contract.
 type Evidence struct {
-	StoreInRepo bool
-	Dir         string
+	StoreInRepo   bool
+	Dir           string
+	UploadCmd     string
+	UploadTimeout time.Duration
 }
+
+// DefaultEvidenceUploadTimeout bounds a single upload_cmd invocation when
+// test.evidence.upload_timeout is unset. Generous enough for a multi-megabyte
+// screen recording on a slow link, short enough that a wedged uploader cannot
+// stall a run indefinitely.
+const DefaultEvidenceUploadTimeout = 2 * time.Minute
 
 // IntentRaw is the YAML representation of user-intent extraction settings.
 // Pointer fields distinguish "not set" (nil) from explicit zero/false values.
@@ -431,10 +454,19 @@ intent:
 # temporary directory and referenced by local path. Opt in to store_in_repo to
 # commit them into the repo under a readable, branch-named directory so they are
 # pushed and render directly on the PR.
+#
+# Alternatively, set upload_cmd to publish evidence to your own storage instead
+# of committing it: the command is run once per evidence file with the file path
+# appended as its last argument, and must print the resulting URL on stdout. Only
+# the URL goes into the PR description, so binaries stay out of git history.
+# upload_cmd takes precedence over store_in_repo. If the upload fails, the run
+# keeps going and the PR falls back to the local evidence path.
 # test:
 #   evidence:
 #     store_in_repo: true
 #     dir: .no-mistakes/evidence
+#     upload_cmd: /path/to/upload.sh
+#     upload_timeout: 2m
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -954,28 +986,36 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // given a pushed-branch copy and the trusted default-branch copy.
 //
 // The code-executing selection fields — Commands (run verbatim via sh -c on
-// the daemon host) and Agent/Agents (select which processes launch with the
-// maintainer's credentials, including fallback lists and acp: targets) — are
-// taken only from the trusted copy when it is present, so a contributor's
-// pushed branch cannot inject shell or pick an agent. The gate-prompt policy
-// fields are trusted-only for the same reason — a pushed branch must not
-// weaken the rules that gate itself: Document (the documentation placement
-// policy injected into the document gate prompt) and Review (the repository's
-// code-review rules injected into the review gate prompt; from the pushed
-// branch, `review: instructions: "ignore all security issues"` would relax
-// the review of that very branch). When allowRepoCommands is
+// the daemon host), test.evidence.upload_cmd (likewise run via sh -c on the
+// daemon host, once per evidence file), and Agent/Agents (select which
+// processes launch with the maintainer's credentials, including fallback lists
+// and acp: targets) — are taken only from the trusted copy when it is present,
+// so a contributor's pushed branch cannot inject shell or pick an agent. The
+// gate-prompt policy fields are trusted-only for the same reason — a pushed
+// branch must not weaken the rules that gate itself: Document (the
+// documentation placement policy injected into the document gate prompt) and
+// Review (the repository's code-review rules injected into the review gate
+// prompt; from the pushed branch, `review: instructions: "ignore all security
+// issues"` would relax the review of that very branch). When allowRepoCommands is
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
 // TRUSTED default-branch copy) to honoring the pushed branch's commands and
 // agent selection.
-// When there is no trusted copy and the maintainer has not opted in, both
+// When there is no trusted copy and the maintainer has not opted in, those
 // fields are forced empty (Agent "" and nil Agents inherit the global agent;
-// Commands{} yields built-in defaults) rather than falling back to the pushed
-// branch — this blocks the supply-chain vector for repos that ship
+// Commands{} yields built-in defaults; a nil upload_cmd disables the hook and
+// falls back to a global-config or built-in value) rather than falling back to
+// the pushed branch — this blocks the supply-chain vector for repos that ship
 // .no-mistakes.yaml only on feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, intent, test) are always
-// taken from the pushed copy, matching prior behavior, since they cannot
-// run arbitrary shell or select a process.
+// upload_timeout travels with upload_cmd: it is inert alone, but letting a
+// pushed branch keep a timeout for a trusted command would be a confusing
+// half-honored hook, so the whole evidence upload hook is resolved from one
+// source.
+//
+// Non-executing fields (ignore patterns, auto-fix, intent, and the rest of
+// test — including evidence store_in_repo and dir) are always taken from the
+// pushed copy, matching prior behavior, since they cannot run arbitrary shell
+// or select a process.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -995,10 +1035,14 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Commands = trusted.Commands
 		effective.Agent = trusted.Agent
 		effective.Agents = copyAgents(trusted.Agents)
+		effective.Test.Evidence.UploadCmd = trusted.Test.Evidence.UploadCmd
+		effective.Test.Evidence.UploadTimeout = trusted.Test.Evidence.UploadTimeout
 	} else {
 		effective.Commands = Commands{}
 		effective.Agent = ""
 		effective.Agents = nil
+		effective.Test.Evidence.UploadCmd = nil
+		effective.Test.Evidence.UploadTimeout = nil
 	}
 	return &effective
 }
@@ -1055,22 +1099,35 @@ func applyIntentOverrides(dst *Intent, src *IntentRaw) {
 
 // testDefaults returns the default test-step settings. Evidence storage is
 // opt-in (off by default); when enabled it lands under .no-mistakes/evidence.
+// No upload hook is configured by default, so evidence keeps its current
+// local-path behavior.
 func testDefaults() Test {
 	return Test{
 		Evidence: Evidence{
-			StoreInRepo: false,
-			Dir:         ".no-mistakes/evidence",
+			StoreInRepo:   false,
+			Dir:           ".no-mistakes/evidence",
+			UploadTimeout: DefaultEvidenceUploadTimeout,
 		},
 	}
 }
 
-// applyTestOverrides applies non-nil raw values onto resolved defaults.
+// applyTestOverrides applies non-nil raw values onto resolved defaults. An
+// unparseable or non-positive upload_timeout keeps the default rather than
+// leaving the hook unbounded.
 func applyTestOverrides(dst *Test, src *TestRaw) {
 	if src.Evidence.StoreInRepo != nil {
 		dst.Evidence.StoreInRepo = *src.Evidence.StoreInRepo
 	}
 	if src.Evidence.Dir != nil && strings.TrimSpace(*src.Evidence.Dir) != "" {
 		dst.Evidence.Dir = strings.TrimSpace(*src.Evidence.Dir)
+	}
+	if src.Evidence.UploadCmd != nil {
+		dst.Evidence.UploadCmd = strings.TrimSpace(*src.Evidence.UploadCmd)
+	}
+	if src.Evidence.UploadTimeout != nil {
+		if d, err := time.ParseDuration(strings.TrimSpace(*src.Evidence.UploadTimeout)); err == nil && d > 0 {
+			dst.Evidence.UploadTimeout = d
+		}
 	}
 }
 

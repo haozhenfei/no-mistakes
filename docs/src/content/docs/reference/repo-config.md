@@ -6,7 +6,7 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, both fields are forced empty - the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands` and `agent` you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`) are still read from the pushed branch. The two gate-prompt policy fields are the exception: `document.instructions` and `review.instructions` are also read only from the trusted default branch, because a pushed branch must not be able to rewrite the rules that gate it.
+`commands.*` and `test.evidence.upload_cmd` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, and `test.evidence.upload_cmd` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, those fields are forced empty - the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands`, `agent`, and [`test.evidence.upload_cmd`](#the-upload-hook-upload_cmd) you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, and the rest of `test` - including `evidence.store_in_repo` and `evidence.dir`) are still read from the pushed branch. The two gate-prompt policy fields are the exception: `document.instructions` and `review.instructions` are also read only from the trusted default branch, because a pushed branch must not be able to rewrite the rules that gate it.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -54,6 +54,10 @@ test:
   evidence:
     store_in_repo: true
     dir: .no-mistakes/evidence
+    # Or, instead of committing evidence, upload it and link only the URL.
+    # Read only from the trusted default branch.
+    # upload_cmd: /opt/no-mistakes/upload-evidence.sh
+    # upload_timeout: 2m
 ```
 
 ## Fields
@@ -88,14 +92,14 @@ This per-repo `agent` value, including every fallback entry, is still read from 
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}` and `agent`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}`, `agent`, and `test.evidence.upload_cmd`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 |---|---|
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands` and `agent` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `agent`, and `test.evidence.upload_cmd` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
 
 ### commands.test
 
@@ -237,15 +241,65 @@ Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `p
 
 ### test.evidence
 
-Override where evidence artifacts from the test step are stored.
+Override where evidence artifacts from the test step are stored, and optionally upload them to your own storage instead of keeping them locally.
 Fields not set here inherit from global config and then the built-in defaults.
 
 | Field | Type | Default |
 |---|---|---|
 | `test.evidence.store_in_repo` | `bool` | Inherits from global (default `false`) |
 | `test.evidence.dir` | `string` | Inherits from global (default `.no-mistakes/evidence`) |
+| `test.evidence.upload_cmd` | `string` | Inherits from global (default empty, hook disabled) - **read only from the trusted default branch** |
+| `test.evidence.upload_timeout` | `string` (duration) | Inherits from global (default `2m`) - **read only from the trusted default branch** |
 
 By default, test evidence stays in a temporary directory keyed by run ID and is referenced by local path.
 Set `store_in_repo: true` to write evidence under `<dir>/<branch-slug>` inside the worktree so push can commit and publish it with the branch.
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
 If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
+
+#### The upload hook (`upload_cmd`)
+
+Evidence is only useful for the few days a change is under review, but `store_in_repo` leaves screenshots and recordings in git history forever.
+Set `upload_cmd` to publish evidence to storage you control instead: no-mistakes runs your command once per evidence file, reads a URL back, and writes only that URL into the PR/MR description.
+no-mistakes knows nothing about object storage - which bucket, which credentials, which CDN all live in your script.
+
+```yaml
+test:
+  evidence:
+    upload_cmd: /opt/no-mistakes/upload-evidence.sh
+    upload_timeout: 2m
+```
+
+The contract between no-mistakes and your script:
+
+| | |
+|---|---|
+| Invocation | Once per evidence file, from the worktree, via `sh -c` (POSIX) or `cmd.exe /c` (Windows). The absolute evidence file path is appended as the command's **last argument**, so a bare hook reads it as `$1` and a hook with its own flags (`upload.sh --bucket evidence`) gets it after them. |
+| Environment | `NM_EVIDENCE_FILE` (the same absolute path), `NM_EVIDENCE_LABEL`, `NM_EVIDENCE_RUN_ID`, `NM_EVIDENCE_BRANCH`. |
+| Success | Exit code `0` **and** an absolute `http`/`https` URL as the **last non-empty line of stdout**. Only stdout is read, so your script can log progress freely to stderr. |
+| Failure | Any of: non-zero exit, timeout, empty stdout, or stdout that is not a well-formed absolute `http(s)` URL. |
+| On failure | The run **continues**. The artifact keeps its local path (exactly the no-hook behavior), the failure is logged, and a warning line is appended to the PR's testing summary. A storage outage never fails a change whose tests passed - the upload is a publication channel, not a gate. |
+| Timeout | `upload_timeout` per invocation (Go duration string, e.g. `90s`, `2m`). An unparseable or non-positive value falls back to the `2m` default rather than running unbounded. |
+
+A minimal hook:
+
+```sh
+#!/bin/sh
+# $1 is the evidence file; print the resulting URL on stdout.
+set -eu
+echo "uploading $1..." >&2          # progress goes to stderr
+my-storage-cli put "$1" --quiet >&2
+echo "https://cdn.example.com/evidence/$(basename "$1")"
+```
+
+`upload_cmd` takes precedence over `store_in_repo`: when the hook is configured, evidence stays in the temporary directory and is never committed into the branch, since keeping binaries out of git history is the point of uploading them.
+Only files that exist under the evidence directory or the worktree are uploaded; an artifact path pointing elsewhere on the daemon host is left alone.
+Artifacts the agent already published with a URL of their own are not re-uploaded.
+
+:::caution[`upload_cmd` is read only from your default branch]
+`upload_cmd` is a shell command line the daemon runs on the maintainer's machine, so it is a code-executing field exactly like `commands.*`.
+It is read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA - otherwise anyone who can push a branch could run arbitrary code on the daemon host.
+An `upload_cmd` set on a pushed feature branch is ignored (the run behaves as if no hook were configured).
+`upload_timeout` travels with it, from the same source.
+Commit the hook to your default branch, or configure it in [global config](/reference/global-config/), which is your own file on your own machine.
+[`allow_repo_commands: true`](#allow_repo_commands) opts in to honoring the pushed branch's `upload_cmd`, with the same eyes-open trade-off it carries for `commands` and `agent`.
+:::
