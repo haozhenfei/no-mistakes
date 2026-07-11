@@ -1,0 +1,355 @@
+---
+title: Global Config Reference
+description: All fields for ~/.no-mistakes/config.yaml.
+---
+
+Global configuration lives at `~/.no-mistakes/config.yaml`. Set `NM_HOME` to relocate the config directory.
+
+```yaml
+# ~/.no-mistakes/config.yaml
+
+agent: auto
+
+acpx_path: acpx
+
+acp_registry_overrides:
+  local-gemini: node /opt/mock-acp-agent.mjs
+
+agent_path_override:
+  claude: /Users/you/bin/claude
+  codex: /opt/homebrew/bin/codex
+  rovodev: /usr/local/bin/acli
+  opencode: /usr/local/bin/opencode
+  pi: /usr/local/bin/pi
+  copilot: /usr/local/bin/copilot
+
+agent_args_override:
+  codex:
+    - -m
+    - gpt-5.4
+    - -c
+    - service_tier="priority"
+    - -c
+    - model_reasoning_effort="low"
+
+ci_timeout: "168h"
+
+step_quiet_warning: "10m"
+
+daemon_connect_timeout: "3s"
+
+log_level: info
+
+session_reuse: true
+
+auto_fix:
+  rebase: 3
+  review: 0
+  test: 3
+  qa: 3
+  document: 3
+  lint: 3
+  ci: 3
+
+intent:
+  enabled: true
+  threshold: 0.2
+  slack_days: 3
+  disabled_readers: []
+
+test:
+  evidence:
+    store_in_repo: false
+    dir: .no-mistakes/evidence
+```
+
+## Fields
+
+### agent
+
+Default agent for all repos and setup-wizard suggestions. Can be overridden per-repo.
+
+|         |                                                                                   |
+| ------- | --------------------------------------------------------------------------------- |
+| Type    | `string` or `string[]`                                                            |
+| Values  | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `acp:<target>` |
+| Default | `auto`                                                                            |
+
+`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, then `copilot`.
+`acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`.
+ACP agents are opt-in and are not considered by `agent: auto`.
+The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
+If an explicit agent is unavailable, `auto` finds no native agent, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
+`no-mistakes doctor` checks the global configuration, while every run repeats resolution after applying any trusted repository-level `agent` override.
+
+You can also set an ordered fallback list:
+
+```yaml
+agent: [codex, claude]
+```
+
+The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
+If no entry is available, the gate fails before its first pipeline step.
+If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
+Structured findings and schema/output validation problems do not trigger fallback.
+
+### acpx_path
+
+Path to the user-installed `acpx` binary used for `agent: acp:<target>`.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | `acpx`   |
+
+### acp_registry_overrides
+
+Map an ACP target name to a raw ACP agent command.
+When `agent: acp:<target>` matches an override key, no-mistakes runs `acpx --agent <command>` instead of `acpx <target>`.
+
+|         |                     |
+| ------- | ------------------- |
+| Type    | `map[string]string` |
+| Default | Empty               |
+
+Example:
+
+```yaml
+agent: acp:local-gemini
+acp_registry_overrides:
+  local-gemini: node /opt/mock-acp-agent.mjs
+```
+
+### agent_path_override
+
+Custom binary paths for native agents.
+When set, `no-mistakes` uses this path instead of looking up the binary on `PATH`.
+ACP agents use `acpx_path` instead.
+
+|         |                                   |
+| ------- | --------------------------------- |
+| Type    | `map[string]string`               |
+| Default | Empty (uses default binary names) |
+
+Default native binary names when no override is set:
+
+| Agent      | Binary     |
+| ---------- | ---------- |
+| `claude`   | `claude`   |
+| `codex`    | `codex`    |
+| `rovodev`  | `acli`     |
+| `opencode` | `opencode` |
+| `pi`       | `pi`       |
+| `copilot`  | `copilot`  |
+
+### agent_args_override
+
+Extra CLI flags to pass to each native agent.
+Use this to set model selection, service tier, reasoning effort, permission mode, or any other flag the underlying agent supports.
+
+|         |                                                           |
+| ------- | --------------------------------------------------------- |
+| Type    | `map[string][]string`                                     |
+| Keys    | `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot` |
+| Default | Empty (no extra flags)                                    |
+
+User-supplied flags are inserted ahead of no-mistakes' managed flags, so your choices usually take precedence. A few flags are reserved because no-mistakes depends on them to communicate with the agent - setting any of these returns a config error on load:
+
+| Agent      | Reserved flags                                                                                              |
+| ---------- | ----------------------------------------------------------------------------------------------------------- |
+| `claude`   | `-p`, `--print`, `--verbose`, `--output-format`, `--json-schema`, `-r`, `--resume`, `--session-id`, `-c`, `--continue`, `--fork-session` |
+| `codex`    | `exec`, `resume`, `--resume`, `--session`, `--session-id`, `--thread`, `--thread-id`, `--last`, `--json`, `--color` |
+| `rovodev`  | `rovodev`, `serve`, `--disable-session-token`                                                               |
+| `opencode` | `serve`, `--hostname`, `--port`, `--print-logs`                                                             |
+| `pi`       | `--mode`, `--no-session`                                                                                    |
+| `copilot`  | `-p`, `--prompt`, `--output-format`, `--no-color`                                                          |
+
+For structured `codex` runs, no-mistakes also appends its own `--output-schema <tempfile>` after your overrides. Treat that flag as managed even though config validation does not currently reject it.
+The Claude and Codex session-control forms are reserved so no-mistakes can keep reviewer and fixer conversations role-isolated.
+
+Smart defaults:
+
+- For `claude`, supplying `--permission-mode` (or `--dangerously-skip-permissions`) suppresses the default `--dangerously-skip-permissions`.
+- For `codex`, supplying `--ask-for-approval`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox` suppresses the default `--dangerously-bypass-approvals-and-sandbox`.
+
+Permission and sandbox flags affect the underlying agent, but they do not disable no-mistakes' pipeline prompt steering.
+Pipeline agents are still told to keep intentional writes inside the worktree and avoid mutating system state outside it.
+
+Example:
+
+```yaml
+agent_args_override:
+  claude:
+    - --model
+    - sonnet
+    - --permission-mode
+    - acceptEdits
+  codex:
+    - -m
+    - gpt-5.4
+    - -c
+    - service_tier="priority"
+    - -c
+    - model_reasoning_effort="low"
+  rovodev:
+    - --profile
+    - work
+  opencode:
+    - --model
+    - gpt-5
+  pi:
+    - --provider
+    - google
+```
+
+For Codex, `service_tier` and `model_reasoning_effort` tune different things: `service_tier` selects the speed or priority lane, while `model_reasoning_effort` selects reasoning depth. no-mistakes reloads global config while setting up each run, so edits made before `no-mistakes axi run` apply to that run. For repeatable profiles, use separately initialized `NM_HOME` directories; each has its own `config.yaml` and no-mistakes state.
+
+### ci_timeout
+
+How long the CI step monitors an open PR, including provider CI status and on GitHub, GitLab, or Azure DevOps PR mergeability, before giving up.
+
+|         |                                                 |
+| ------- | ----------------------------------------------- |
+| Type    | `string` (Go duration, or an unlimited keyword) |
+| Default | `168h` (7 days)                                 |
+
+Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
+
+This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
+So an actively-updated green PR keeps its monitor no matter how long it stays open.
+If it later develops an actual GitHub, GitLab, or Azure DevOps merge conflict, the CI auto-fix path rebases and re-pushes it, while a clean behind PR needs no command.
+A genuinely idle/abandoned PR is still reaped after the timeout elapses.
+
+Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to monitor until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`.
+
+Legacy alias: `babysit_timeout`.
+
+### step_quiet_warning
+
+How long a running or fixing step can go without recorded step-log or native-agent lifecycle activity before AXI status marks the step as quiet.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `10m`                  |
+
+Accepts any positive Go `time.ParseDuration` string: `30s`, `5m`, `1h`, etc.
+Non-positive values are ignored and keep the default.
+
+This is observability only.
+It does not cancel the step, change auto-fix behavior, or mark the run failed.
+AXI renders the quiet signal in the `active_steps` table as part of `last_activity`, for example `quiet 12m3s ago: codex started pid=4242`.
+For older active runs that do not yet have activity rows, AXI falls back to the step log file's modification time.
+
+### daemon_connect_timeout
+
+Maximum time a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `3s`                   |
+
+Accepts any positive Go `time.ParseDuration` string. Overridable per-invocation with the `NM_DAEMON_CONNECT_TIMEOUT` environment variable; see [Environment Variables](/no-mistakes/reference/environment/#nm_daemon_connect_timeout).
+
+### log_level
+
+Daemon log verbosity.
+
+|         |                                  |
+| ------- | -------------------------------- |
+| Type    | `string`                         |
+| Values  | `debug`, `info`, `warn`, `error` |
+| Default | `info`                           |
+
+### session_reuse
+
+Per-run, per-role agent session reuse for the review loop.
+
+|         |        |
+| ------- | ------ |
+| Type    | `bool` |
+| Default | `true` |
+
+When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), each run keeps one durable reviewer session across the initial full review and every full rereview, and a separate durable fixer session across review-fix turns.
+The roles never share a session, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
+Every review turn still performs a full review of the complete branch diff; only the reviewer's own prior context is carried.
+When resume is unavailable or fails, the invocation falls back to a cold run or a fresh same-role session and the fallback is recorded in the local `agent_invocations` performance record.
+Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts.
+After a daemon restart, no-mistakes resumes only fully recorded parked approval gates; incomplete or ambiguous active runs fail closed through normal crash recovery.
+Set `false` to force every agent invocation cold.
+
+### auto_fix
+
+Maximum follow-up auto-fix attempts per step. Set a step to `0` to disable the follow-up auto-fix loop, so findings require manual approval.
+The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
+For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings then pause for approval instead of starting another automatic fix loop.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field               | Type  | Default | Description                                                                                 |
+| ------------------- | ----- | ------- | ------------------------------------------------------------------------------------------- |
+| `auto_fix.rebase`   | `int` | `3`     | Rebase conflict auto-fix attempts                                                           |
+| `auto_fix.review`   | `int` | `0`     | Review finding auto-fix attempts                                                            |
+| `auto_fix.test`     | `int` | `3`     | Test failure auto-fix attempts                                                              |
+| `auto_fix.qa`       | `int` | `3`     | QA finding auto-fix attempts                                                                |
+| `auto_fix.verify`   | `int` | `0`     | Verify finding auto-fix attempts                                                            |
+| `auto_fix.document` | `int` | `3`     | Not used by the automatic document pass                                                     |
+| `auto_fix.lint`     | `int` | `3`     | Lint issue auto-fix attempts                                                                |
+| `auto_fix.ci`       | `int` | `3`     | CI auto-fix attempts for CI failures, plus GitHub, GitLab, and Azure DevOps merge conflicts |
+
+Legacy alias: `auto_fix.babysit`.
+
+These are global defaults. Per-repo config can override individual steps.
+
+### intent
+
+Transcript-based user-intent extraction settings.
+When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, pass that summary to rebase, review, test, QA, verify, document, lint, CI auto-fix, and PR prompts, and include it in generated PR descriptions.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                     | Type       | Default | Description                                                |
+| ------------------------- | ---------- | ------- | ---------------------------------------------------------- |
+| `intent.enabled`          | `bool`     | `true`  | Enable transcript-based intent extraction                  |
+| `intent.threshold`        | `float`    | `0.2`   | Minimum raw match score for selecting a transcript session |
+| `intent.slack_days`       | `int`      | `3`     | Extra days to look back before the change window           |
+| `intent.disabled_readers` | `string[]` | Empty   | Transcript readers to disable                              |
+
+Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
+
+The match score is the share of matching files mentioned in a transcript session; deleted files are ignored when the diff also contains non-deleted changes.
+All-deletion diffs still match against the deleted changed files.
+Mentioning extra files does not reduce the score.
+For multi-file diffs, no-mistakes still requires at least two overlapping files and an effective minimum score of `0.5`.
+Partial matches older than 24 hours are rejected unless their raw score is at least `0.8`.
+If exactly one accepted candidate has a raw score of at least `0.85`, that decisive candidate wins before recency ranking.
+Otherwise, accepted candidates are ranked by confidence, which combines the raw score with a small recency boost, with ties going to the most recent matching session, and ambiguous accepted candidates may be disambiguated by the configured pipeline agent.
+
+### test.evidence
+
+Test-step evidence storage settings.
+By default, evidence artifacts stay in a temporary directory keyed by run ID and are referenced by local path.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                         | Type     | Default                 | Description                                                           |
+| ----------------------------- | -------- | ----------------------- | --------------------------------------------------------------------- |
+| `test.evidence.store_in_repo` | `bool`   | `false`                 | Commit and push test evidence artifacts from inside the repo worktree |
+| `test.evidence.dir`           | `string` | `.no-mistakes/evidence` | Repo-relative parent directory used when `store_in_repo` is true      |
+
+When `store_in_repo` is true, the test step writes evidence under `<dir>/<branch-slug>` and the push step stages files from that directory before committing agent changes.
+Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
+If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
+
+These are global defaults. Per-repo config can override either field.
+
+## Environment variables
+
+See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, `NM_DAEMON_CONNECT_TIMEOUT`, Bitbucket Cloud credentials, and update-check suppression.

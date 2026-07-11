@@ -1,0 +1,160 @@
+package db
+
+const schemaSQL = `
+CREATE TABLE IF NOT EXISTS repos (
+    id             TEXT PRIMARY KEY,
+    working_path   TEXT NOT NULL UNIQUE,
+    upstream_url   TEXT NOT NULL,
+    fork_url       TEXT,
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    created_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id                   TEXT PRIMARY KEY,
+    repo_id              TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    branch               TEXT NOT NULL,
+    head_sha             TEXT NOT NULL,
+    base_sha             TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'pending',
+    pr_url               TEXT,
+    error                TEXT,
+    awaiting_agent_since INTEGER,
+    parked_ms            INTEGER,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS step_results (
+    id               TEXT PRIMARY KEY,
+    run_id           TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_name        TEXT NOT NULL,
+    step_order       INTEGER NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    exit_code        INTEGER,
+    duration_ms      INTEGER,
+    log_path         TEXT,
+    findings_json    TEXT,
+    error            TEXT,
+    started_at       INTEGER,
+    completed_at     INTEGER,
+    last_activity_at INTEGER,
+    last_activity    TEXT,
+    agent_pid        INTEGER,
+    auto_fix_limit   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS step_rounds (
+    id                   TEXT PRIMARY KEY,
+    step_result_id       TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    round                INTEGER NOT NULL,
+    trigger_type         TEXT NOT NULL,
+    findings_json        TEXT,
+    user_findings_json   TEXT,
+    selected_finding_ids TEXT,
+    selection_source     TEXT,
+    fix_summary          TEXT,
+    duration_ms          INTEGER NOT NULL,
+    created_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_invocations (
+    id                    TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_name             TEXT NOT NULL,
+    round                 INTEGER NOT NULL,
+    purpose               TEXT NOT NULL,
+    agent                 TEXT NOT NULL,
+    model                 TEXT,
+    session_mode          TEXT NOT NULL,
+    session_key           TEXT,
+    started_at            INTEGER NOT NULL,
+    completed_at          INTEGER NOT NULL,
+    duration_ms           INTEGER NOT NULL,
+    exit_status           TEXT NOT NULL,
+    failure_category      TEXT,
+    input_tokens          INTEGER,
+    output_tokens         INTEGER,
+    cache_read_tokens     INTEGER,
+    cache_creation_tokens INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_invocations_run_started_id
+    ON agent_invocations (run_id, started_at, id);
+
+CREATE TABLE IF NOT EXISTS run_agent_sessions (
+    run_id     TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    role       TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, role)
+);
+
+CREATE TABLE IF NOT EXISTS intent_cache (
+    cache_key   TEXT PRIMARY KEY,
+    summary     TEXT NOT NULL,
+    agent_name  TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS claims (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step          TEXT NOT NULL,
+    text          TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    evidence_json TEXT,
+    hunks_json    TEXT,
+    verdict       TEXT,
+    verdict_by    TEXT,
+    created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS verify_verdicts (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    claim_id      TEXT NOT NULL,
+    verdict       TEXT NOT NULL,
+    rationale     TEXT,
+    evidence_json TEXT,
+    votes_json    TEXT,
+    created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS coverage_entries (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    file          TEXT NOT NULL,
+    start_line    INTEGER NOT NULL,
+    end_line      INTEGER NOT NULL,
+    state         TEXT NOT NULL,
+    reason        TEXT,
+    evidence_json TEXT,
+    source        TEXT,
+    created_at    INTEGER NOT NULL
+);
+`
+
+// migrationStatements hold additive schema changes applied to databases that
+// were created before the referenced columns existed. Each statement must be
+// idempotent via its error being tolerated when the column already exists.
+var migrationStatements = []string{
+	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN user_findings_json TEXT`,
+	`ALTER TABLE runs ADD COLUMN intent TEXT`,
+	`ALTER TABLE runs ADD COLUMN intent_source TEXT`,
+	`ALTER TABLE runs ADD COLUMN intent_session_id TEXT`,
+	`ALTER TABLE runs ADD COLUMN intent_score REAL`,
+	`ALTER TABLE runs ADD COLUMN awaiting_agent_since INTEGER`,
+	`ALTER TABLE runs ADD COLUMN parked_ms INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN last_activity_at INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
+	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+}
