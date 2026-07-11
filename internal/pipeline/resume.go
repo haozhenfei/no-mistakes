@@ -49,3 +49,33 @@ func CompletedStepReusable(step *db.StepResult, headSHA, configHash string) bool
 	}
 	return true
 }
+
+// SkipSet turns a skip list into the lookup the executor and resume predicates
+// use. It returns nil for an empty list so a nil map means "skip nothing".
+func SkipSet(names []types.StepName) map[types.StepName]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[types.StepName]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+// ResumeStepReusable is the leading-prefix predicate for explicit resume: a
+// step needs no rerun when it completed for this exact head/config, or when the
+// run is configured to skip it and the row already records it as skipped.
+//
+// Head/config validation deliberately does not apply to the skipped case. A
+// skipped step validated nothing, so nothing about it can go stale; the run's
+// persisted skip set (runs.skip_steps) says it must not run, and resume must
+// honor that instead of reviving it (a skipped row is not `completed`, so
+// without this the prefix would break here and re-execute the very step the
+// caller paid to skip).
+func ResumeStepReusable(step *db.StepResult, headSHA, configHash string, skips map[types.StepName]bool) bool {
+	if CompletedStepReusable(step, headSHA, configHash) {
+		return true
+	}
+	return step != nil && skips[step.StepName] && step.Status == types.StepStatusSkipped
+}

@@ -102,6 +102,12 @@ type GetActiveRunParams struct {
 
 // RerunParams requests a new run for the latest gate head on a branch.
 // Intent, when set, is stamped onto the new run like PushReceivedParams.Intent.
+//
+// SkipSteps is authoritative for the new run and is NOT inherited from the
+// previous run: a rerun is a fresh invocation, and every caller that reruns
+// (`no-mistakes axi run`) passes its own --skip. Resume is the opposite - it
+// continues one existing run, so it reads that run's persisted skip set back
+// from runs.skip_steps (see ResumeParams).
 type RerunParams struct {
 	RepoID    string           `json:"repo_id"`
 	Branch    string           `json:"branch"`
@@ -112,6 +118,11 @@ type RerunParams struct {
 // ResumeParams resumes a previous run for the same branch head. OldRunID is
 // optional; when empty, the daemon picks the newest resumable run for the
 // branch and current head.
+//
+// There is deliberately no SkipSteps field: resume continues an existing run,
+// and that run's skip set is already persisted on its row (runs.skip_steps).
+// The daemon reads it back, so the caller never has to repeat --skip and cannot
+// contradict what the run was started with.
 type ResumeParams struct {
 	RepoID   string `json:"repo_id"`
 	Branch   string `json:"branch"`

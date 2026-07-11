@@ -110,7 +110,8 @@ func newAxiResumeCmd() *cobra.Command {
 		Long: "Resumes a failed, cancelled, or interrupted run for the current branch\n" +
 			"head. Completed steps are reused only when they recorded the exact same\n" +
 			"head commit and effective config; the first invalidated step and every\n" +
-			"later step rerun.\n\n" +
+			"later step rerun. Steps the original run skipped (--skip) stay skipped:\n" +
+			"the skip set belongs to the run, so it does not need repeating here.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,

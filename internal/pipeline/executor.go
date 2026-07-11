@@ -54,16 +54,12 @@ type Executor struct {
 	waitingStep types.StepName        // which step is currently awaiting approval
 }
 
-// SetSkippedSteps configures steps that should be marked skipped without running.
+// SetSkippedSteps configures steps that should be marked skipped without
+// running. It applies to Execute and to ResumeFrom alike: the skip set is a
+// property of the run (persisted as runs.skip_steps), so resuming a run must
+// not revive a step the caller skipped.
 func (e *Executor) SetSkippedSteps(steps []types.StepName) {
-	if len(steps) == 0 {
-		e.skips = nil
-		return
-	}
-	e.skips = make(map[types.StepName]bool, len(steps))
-	for _, step := range steps {
-		e.skips[step] = true
-	}
+	e.skips = SkipSet(steps)
 }
 
 // NewExecutor creates a pipeline executor.
@@ -238,7 +234,7 @@ func (e *Executor) ResumeFrom(ctx context.Context, run *db.Run, repo *db.Repo, w
 		if result.StepName != e.steps[i].Name() {
 			return e.failRun(run, repo, fmt.Errorf("resume step %d is %q, want %q", i, result.StepName, e.steps[i].Name()), ctx)
 		}
-		if CompletedStepReusable(result, run.HeadSHA, configHash) {
+		if ResumeStepReusable(result, run.HeadSHA, configHash, e.skips) {
 			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, result.StepName, string(result.Status), "", "", "", result.DurationMS)
 			continue
 		}
@@ -261,6 +257,14 @@ func (e *Executor) ResumeFrom(ctx context.Context, run *db.Run, repo *db.Repo, w
 	for index := start; index < len(e.steps); index++ {
 		if ctx.Err() != nil {
 			return e.failRun(run, repo, context.Cause(ctx), ctx)
+		}
+		stepName := e.steps[index].Name()
+		if e.skips[stepName] {
+			if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", stepName, err), ctx)
+			}
+			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusSkipped), "", "", "", nil)
+			continue
 		}
 		skipRemaining, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, stepExecutionState{})
 		if err != nil {
