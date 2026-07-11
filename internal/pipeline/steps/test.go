@@ -165,6 +165,8 @@ Previous test findings to address:
 		evidenceGuidance := fmt.Sprintf("- Write new evidence files into this temporary evidence directory: %s", evidenceDir)
 		if evidenceLocation.StoreInRepo {
 			evidenceGuidance = fmt.Sprintf("- Write new evidence files into this in-repo evidence directory; it is committed and pushed automatically, so artifacts render directly on the PR: %s", evidenceDir)
+		} else if strings.TrimSpace(sctx.Config.Test.Evidence.UploadCmd) != "" {
+			evidenceGuidance = fmt.Sprintf("- Write new evidence files into this evidence directory: %s\n- Each evidence file you record with an artifact path is uploaded to external storage automatically after this step, and the PR shows the resulting URL, so artifacts render on the PR without being committed. Just record the local path.", evidenceDir)
 		}
 		evidenceGuidance += "\n" + evidenceVaultGuidance + "\n" + coverageLedgerGuidance
 		configuredTestCommand := ""
@@ -239,6 +241,19 @@ Rules:
 		if len(tested) > 0 {
 			findings.Tested = append(append([]string{}, tested...), findings.Tested...)
 		}
+
+		// Publish evidence through the configured upload hook, if any, so the PR
+		// carries URLs instead of daemon-host paths or committed binaries. A
+		// failed upload degrades to the local path and never fails the step.
+		uploadEvidenceArtifacts(ctx, uploadContext{
+			WorkDir:     sctx.WorkDir,
+			EvidenceDir: evidenceDir,
+			Branch:      sctx.Run.Branch,
+			RunID:       sctx.Run.ID,
+			Env:         sctx.Env,
+			Evidence:    sctx.Config.Test.Evidence,
+			Log:         sctx.Log,
+		}, &findings)
 
 		needsApproval := hasBlockingFindings(findings.Items)
 		autoFixable := needsApproval

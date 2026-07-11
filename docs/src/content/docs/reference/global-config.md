@@ -60,6 +60,8 @@ test:
   evidence:
     store_in_repo: false
     dir: .no-mistakes/evidence
+    # upload_cmd: /opt/no-mistakes/upload-evidence.sh
+    # upload_timeout: 2m
 ```
 
 ## Fields
@@ -337,16 +339,22 @@ By default, evidence artifacts stay in a temporary directory keyed by run ID and
 | ---- | -------- |
 | Type | `object` |
 
-| Field                         | Type     | Default                 | Description                                                           |
-| ----------------------------- | -------- | ----------------------- | --------------------------------------------------------------------- |
-| `test.evidence.store_in_repo` | `bool`   | `false`                 | Commit and push test evidence artifacts from inside the repo worktree |
-| `test.evidence.dir`           | `string` | `.no-mistakes/evidence` | Repo-relative parent directory used when `store_in_repo` is true      |
+| Field                          | Type     | Default                 | Description                                                                          |
+| ------------------------------ | -------- | ----------------------- | ------------------------------------------------------------------------------------ |
+| `test.evidence.store_in_repo`  | `bool`   | `false`                 | Commit and push test evidence artifacts from inside the repo worktree                |
+| `test.evidence.dir`            | `string` | `.no-mistakes/evidence` | Repo-relative parent directory used when `store_in_repo` is true                     |
+| `test.evidence.upload_cmd`     | `string` | Empty (hook disabled)   | Upload hook: run once per evidence file, print a URL, link only the URL from the PR  |
+| `test.evidence.upload_timeout` | `string` | `2m`                    | Duration bounding a single `upload_cmd` invocation                                   |
 
 When `store_in_repo` is true, the test step writes evidence under `<dir>/<branch-slug>` and the push step stages files from that directory before committing agent changes.
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
 If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
 
-These are global defaults. Per-repo config can override either field.
+`upload_cmd` publishes evidence to storage you control instead of committing it, so binaries stay out of git history; it takes precedence over `store_in_repo`, and a failed upload degrades to the local path rather than failing the run.
+The full hook contract - how the file path is passed, how the URL is read back, and the failure behavior - is documented once in [repo config](/reference/repo-config/#the-upload-hook-upload_cmd).
+Setting it here is trusted by definition (this is your own file on your own machine); in a repo config it is read only from the trusted default branch.
+
+These are global defaults. Per-repo config can override any of these fields.
 
 ## Environment variables
 

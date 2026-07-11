@@ -25,6 +25,12 @@ func testEvidenceDir(runID string) string {
 // directly on the PR. An absolute or escaping configured directory is rejected
 // and falls back to the temporary location so evidence can never be written
 // outside the worktree.
+//
+// A configured upload hook (test.evidence.upload_cmd) takes precedence over
+// store_in_repo: the whole point of uploading evidence is to keep binaries out
+// of git history, so uploaded evidence stays in the temporary directory and is
+// never staged into the branch. Both consumers (the test step and the push
+// step's stageInRepoEvidence) resolve through here, so they cannot disagree.
 func resolveTestEvidenceDir(workDir, branch, runID string, ev config.Evidence) string {
 	location := resolveTestEvidenceLocation(workDir, branch, runID, ev)
 	return location.Dir
@@ -36,7 +42,7 @@ type testEvidenceLocation struct {
 }
 
 func resolveTestEvidenceLocation(workDir, branch, runID string, ev config.Evidence) testEvidenceLocation {
-	if !ev.StoreInRepo {
+	if !ev.StoreInRepo || strings.TrimSpace(ev.UploadCmd) != "" {
 		return testEvidenceLocation{Dir: testEvidenceDir(runID)}
 	}
 	sub, ok := safeRepoSubdir(ev.Dir)
