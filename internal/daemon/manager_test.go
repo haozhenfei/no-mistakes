@@ -773,3 +773,79 @@ func TestPushReceivedDemoModeBypassesAgentResolution(t *testing.T) {
 		t.Error("mock step was never executed")
 	}
 }
+
+// TestResumeDoesNotReviveSkippedStep is the daemon-level regression: a step the
+// caller skipped with --skip must stay skipped when the run is resumed. Resume
+// carries no --skip flag, so the skip set has to come back off the run row
+// (runs.skip_steps); before that existed, resume re-executed the skipped step
+// for real.
+func TestResumeDoesNotReviveSkippedStep(t *testing.T) {
+	review := &mockPassStep{name: types.StepReview}
+	testStep := &mockPassStep{name: types.StepTest}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{review, testStep}
+	})
+
+	_, headSHA := setupTestGitRepo(t, p, d, "resume-revive-repo")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:      p.RepoDir("resume-revive-repo"),
+		Ref:       "refs/heads/main",
+		Old:       "0000000000000000000000000000000000000000",
+		New:       headSHA,
+		SkipSteps: []types.StepName{types.StepReview},
+	}, &first); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, first.RunID)
+	if got := review.execCnt.Load(); got != 0 {
+		t.Fatalf("review executions after --skip review = %d, want 0", got)
+	}
+
+	stored, err := d.GetRun(first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.SkipSteps) != 1 || stored.SkipSteps[0] != types.StepReview {
+		t.Fatalf("persisted skip steps = %v, want [review]", stored.SkipSteps)
+	}
+
+	if err := d.UpdateRunErrorStatus(first.RunID, types.RunInterruptReasonDaemonCrashed, types.RunInterrupted); err != nil {
+		t.Fatal(err)
+	}
+
+	var resumed ipc.ResumeResult
+	if err := client.Call(ipc.MethodResume, &ipc.ResumeParams{
+		RepoID:  "resume-revive-repo",
+		Branch:  "main",
+		HeadSHA: headSHA,
+	}, &resumed); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, resumed.RunID)
+
+	if got := review.execCnt.Load(); got != 0 {
+		t.Fatalf("review executions after resume = %d, want still 0 (skipped step was revived)", got)
+	}
+	if got := testStep.execCnt.Load(); got != 1 {
+		t.Fatalf("test executions after resume = %d, want still 1", got)
+	}
+	if strings.Join(resumed.Skipped, ",") != "review,test" {
+		t.Fatalf("resume reused = %v, want review,test", resumed.Skipped)
+	}
+	steps, err := d.GetStepsByRun(resumed.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range steps {
+		if step.StepName == types.StepReview && step.Status != types.StepStatusSkipped {
+			t.Fatalf("review status after resume = %s, want %s", step.Status, types.StepStatusSkipped)
+		}
+	}
+}

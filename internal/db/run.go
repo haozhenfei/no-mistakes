@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -28,7 +29,13 @@ type Run struct {
 	// ParkedMS accumulates the run's total parked-at-gate wall time in
 	// milliseconds across every gate wait (local performance telemetry;
 	// step duration_ms values exclude this time).
-	ParkedMS        int64
+	ParkedMS int64
+	// SkipSteps are the steps the caller asked this run to skip (`--skip`, or
+	// the `no-mistakes.skip` push option). It is a property of the run, so a
+	// later resume of the same run skips the same steps instead of reviving
+	// them. Persisted as a JSON array of step names; nil when nothing is
+	// skipped.
+	SkipSteps       []types.StepName
 	Intent          *string
 	IntentSource    *string
 	IntentSessionID *string
@@ -37,21 +44,66 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), skip_steps, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
-	return row.Scan(
+	var skipSteps *string
+	if err := row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
-		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
+		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS, &skipSteps,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.CreatedAt, &r.UpdatedAt,
-	)
+	); err != nil {
+		return err
+	}
+	steps, err := decodeSkipSteps(skipSteps)
+	if err != nil {
+		return err
+	}
+	r.SkipSteps = steps
+	return nil
 }
 
-// InsertRun creates a new run record.
+// encodeSkipSteps renders a skip set for storage. An empty set is stored as
+// SQL NULL so old rows and "nothing skipped" are the same thing.
+func encodeSkipSteps(steps []types.StepName) (any, error) {
+	if len(steps) == 0 {
+		return nil, nil
+	}
+	data, err := json.Marshal(steps)
+	if err != nil {
+		return nil, fmt.Errorf("encode skip steps: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodeSkipSteps(raw *string) ([]types.StepName, error) {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil, nil
+	}
+	var steps []types.StepName
+	if err := json.Unmarshal([]byte(*raw), &steps); err != nil {
+		return nil, fmt.Errorf("decode skip steps: %w", err)
+	}
+	if len(steps) == 0 {
+		return nil, nil
+	}
+	return steps, nil
+}
+
+// InsertRun creates a new run record with no skipped steps.
 func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
+	return d.InsertRunWithSkipSteps(repoID, branch, headSHA, baseSHA, nil)
+}
+
+// InsertRunWithSkipSteps creates a new run record and records the steps the
+// caller asked to skip. The skip set is written with the row (not by a later
+// UPDATE) so a crash can never leave a run whose steps were skipped in memory
+// but not on disk - resume reads this column back and would otherwise revive
+// them.
+func (d *DB) InsertRunWithSkipSteps(repoID, branch, headSHA, baseSHA string, skipSteps []types.StepName) (*Run, error) {
 	ts := now()
 	r := &Run{
 		ID:        newID(),
@@ -60,12 +112,20 @@ func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
 		HeadSHA:   headSHA,
 		BaseSHA:   baseSHA,
 		Status:    types.RunPending,
+		SkipSteps: skipSteps,
 		CreatedAt: ts,
 		UpdatedAt: ts,
 	}
-	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.CreatedAt, r.UpdatedAt,
+	if len(skipSteps) == 0 {
+		r.SkipSteps = nil
+	}
+	encoded, err := encodeSkipSteps(r.SkipSteps)
+	if err != nil {
+		return nil, err
+	}
+	_, err = d.sql.Exec(
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, skip_steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, encoded, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

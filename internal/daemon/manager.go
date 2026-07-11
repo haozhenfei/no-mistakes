@@ -427,10 +427,16 @@ func (m *RunManager) HandleResume(ctx context.Context, repoID, branch, headSHA, 
 		return nil, err
 	}
 	execSteps := m.steps()
-	skipped := reusableResumeStepNames(m.db, run.ID, execSteps, headSHA, pipeline.ConfigHash(cfg))
+	// The resumed run's skip set is whatever the original run was started with.
+	// It is not re-supplied by the caller (`axi resume` has no --skip flag), so
+	// it comes back off the run row; without it, resume would revive skipped
+	// steps and execute them for real.
+	skipSteps := run.SkipSteps
+	skipped := reusableResumeStepNames(m.db, run.ID, execSteps, headSHA, pipeline.ConfigHash(cfg), skipSteps)
 
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetSkippedSteps(skipSteps)
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[run.ID] = executor
@@ -542,14 +548,20 @@ func (m *RunManager) resumeSourceRun(repoID, branch, headSHA, oldRunID string) (
 	return nil, fmt.Errorf("no resumable run for branch %s", branch)
 }
 
-func reusableResumeStepNames(database *db.DB, runID string, steps []pipeline.Step, headSHA, configHash string) []string {
+// reusableResumeStepNames reports the leading steps a resume will not re-execute:
+// steps already completed for this head/config, plus steps the run's persisted
+// skip set keeps skipped. It mirrors the executor's own prefix scan
+// (pipeline.ResumeStepReusable) so the "resume: reused ..." line the CLI prints
+// matches what actually happens.
+func reusableResumeStepNames(database *db.DB, runID string, steps []pipeline.Step, headSHA, configHash string, skipSteps []types.StepName) []string {
 	results, err := database.GetStepsByRun(runID)
 	if err != nil || len(results) != len(steps) {
 		return nil
 	}
+	skips := pipeline.SkipSet(skipSteps)
 	var out []string
 	for i, result := range results {
-		if result.StepName != steps[i].Name() || !pipeline.CompletedStepReusable(result, headSHA, configHash) {
+		if result.StepName != steps[i].Name() || !pipeline.ResumeStepReusable(result, headSHA, configHash, skips) {
 			break
 		}
 		out = append(out, string(result.StepName))
@@ -816,8 +828,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
-	// Create run record.
-	run, err := m.db.InsertRun(repo.ID, branch, headSHA, baseSHA)
+	// Create run record. The skip set is stored on the row so a later resume of
+	// this run skips the same steps: `axi resume` carries no --skip flag, and a
+	// skipped step is not `completed`, so without the persisted set resume would
+	// re-execute exactly the steps the caller asked to skip.
+	run, err := m.db.InsertRunWithSkipSteps(repo.ID, branch, headSHA, baseSHA, skipSteps)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)

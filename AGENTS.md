@@ -108,6 +108,13 @@ Safest local verification sequence after non-trivial changes:
 - `runs.awaiting_agent_since` is non-nil **iff** a step is actually parked at an `awaiting_approval`/`fix_review` gate: the executor sets it on gate entry, clears it when `waitForApproval` returns, and `RecoverStaleRuns` clears it on crash recovery. It is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
 - Tests: `internal/db/run_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
 
+**Skipped Steps Are a Property of the Run**
+
+- A run's skip set (`--skip`, or the `no-mistakes.skip` push option) is persisted on the run row (`runs.skip_steps`, written by `InsertRunWithSkipSteps` at insert time, not by a later UPDATE) and is the ONLY source of skips for resume: `axi resume` carries no `--skip` flag, and the daemon reads the set back in `HandleResume`. Never let resume take a skip set from the caller instead - that would let a resume contradict what the run was started with.
+- Skips must be honored in **both** executor paths. `ResumeFrom`'s reusable-prefix scan uses `pipeline.ResumeStepReusable` (completed-for-this-head/config **or** still-skipped), and its execution loop re-checks `e.skips`. A skipped row is `skipped`, not `completed`, so a prefix scan built only on `CompletedStepReusable` breaks at the skipped step and re-executes exactly what the caller paid to skip - that was the bug.
+- Rerun is the deliberate opposite: `RerunParams.SkipSteps` is authoritative for the new run and inherits nothing, because a rerun is a fresh invocation and its callers always pass their own `--skip`.
+- Regressions: `TestExecutor_ResumeDoesNotReviveSkippedStep`, `TestExecutor_ResumeKeepsCompletedTailAfterSkippedStep` (`internal/pipeline`), `TestResumeDoesNotReviveSkippedStep` (`internal/daemon`), `TestOpenMigratesRunsSkipStepsColumn` (`internal/db`).
+
 **Review-Loop Agent Sessions (`internal/pipeline/sessions.go`)**
 
 - Per run, the review loop keeps ONE durable reviewer session across the initial review and every full rereview, and a SEPARATE fixer session across review-fix turns; roles never share a session (the reviewer must never inherit the fixer's rationale), no other step uses sessions, and sessions are keyed strictly by run. Every review turn is still a full adversarial review of the complete branch diff.
