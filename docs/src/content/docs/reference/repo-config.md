@@ -101,6 +101,8 @@ Opt in to honoring the code-executing selection fields (`commands.{test,lint,for
 
 This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `agent`, and `test.evidence.upload_cmd` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
 
+If you cannot commit to your default branch (a frozen `master`, say), set it from the machine instead: [`repos.<path>.allow_repo_commands`](/no-mistakes/reference/global-config/#repos) in `~/.no-mistakes/config.yaml` overrides this field and is equally out of a contributor's reach. That page owns the override, including why the global config is a trust-equivalent place to say this.
+
 ### commands.test
 
 Explicit test command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.

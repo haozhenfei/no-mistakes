@@ -202,6 +202,35 @@ auto_fix:
 	}
 }
 
+// AppendGlobalConfig appends YAML to the no-mistakes global config
+// (<NM_HOME>/config.yaml). It models the one thing only the owner of the daemon
+// host can do — no contributor and no pushed branch can reach this file — which
+// is what makes the repos.<path> override block a trusted maintainer stance.
+// The daemon re-reads the file on every run, so no restart is needed.
+func (h *Harness) AppendGlobalConfig(yaml string) {
+	h.t.Helper()
+	configPath := filepath.Join(h.NMHome, "config.yaml")
+	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		h.t.Fatalf("open global config: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(yaml); err != nil {
+		h.t.Fatalf("append global config: %v", err)
+	}
+}
+
+// PushToUpstream pushes a branch to the origin remote (the bare upstream), so
+// it exists on the server the daemon fetches trusted config from.
+func (h *Harness) PushToUpstream(branch string) {
+	h.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := h.runGit(ctx, h.WorkDir, "push", "origin", branch); err != nil {
+		h.t.Fatalf("git push origin %s: %v\n%s", branch, err, out)
+	}
+}
+
 // initGitRepos creates a bare upstream repo and a working clone with one
 // initial commit on the default branch. Both repos use a local git
 // identity so commits succeed without reading the user's gitconfig.

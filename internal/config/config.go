@@ -65,6 +65,110 @@ type GlobalConfig struct {
 	Intent       IntentRaw
 	Test         TestRaw
 	Verify       VerifyRaw
+	// Repos carries maintainer-owned per-repo overrides, keyed by the repo's
+	// working path. See RepoOverride.
+	Repos map[string]RepoOverride `yaml:"repos"`
+}
+
+// RepoOverride is the per-repo override block in the global config:
+//
+//	repos:
+//	  /Users/me/projects/monorepo:
+//	    allow_repo_commands: true
+//	    default_branch: integration/2026
+//
+// Both fields are maintainer stances that must NOT be settable by whoever
+// pushes a branch. Putting them in ~/.no-mistakes/config.yaml is exactly as
+// trustworthy as putting them on the default branch: only the owner of the
+// daemon host can write that file, and a contributor's pushed branch can never
+// reach it. It is strictly more usable, because it does not require a commit to
+// the default branch — which is what deadlocked allow_repo_commands (the switch
+// that unlocks pushed-branch commands could itself only be set from the default
+// branch) and made default_branch unfixable for repos whose real integration
+// baseline is not the branch the server reports as HEAD.
+type RepoOverride struct {
+	// AllowRepoCommands overrides the trusted default-branch copy's
+	// allow_repo_commands. Nil means "not configured": the trusted copy
+	// decides, preserving the previous behavior. Set explicitly (true or
+	// false) it wins in both directions.
+	AllowRepoCommands *bool `yaml:"allow_repo_commands"`
+	// DefaultBranch overrides the branch recorded in the repos table at init
+	// time (queried from the server with `git ls-remote --symref origin HEAD`).
+	// Empty means "not configured". Use it when the server's HEAD is not the
+	// branch this repo actually integrates onto, e.g. a frozen master with an
+	// `integration/*` baseline: the recorded value would otherwise be used as
+	// the rebase base and diff base, both wrong.
+	DefaultBranch string `yaml:"default_branch"`
+}
+
+// normalizeRepoPath makes a repo path comparable across the ways the same repo
+// gets spelled: a trailing slash or "." segment in a hand-written config key,
+// and the macOS /var → /private/var symlink (the DB stores the resolved path
+// the gate registered, a user typically types the unresolved one).
+func normalizeRepoPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	p = filepath.Clean(p)
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return p
+}
+
+// RepoOverrideFor returns the override block configured for repoPath, or the
+// zero value when the repo has no entry.
+func (c *GlobalConfig) RepoOverrideFor(repoPath string) RepoOverride {
+	if c == nil || len(c.Repos) == 0 {
+		return RepoOverride{}
+	}
+	if ov, ok := c.Repos[repoPath]; ok {
+		return ov
+	}
+	want := normalizeRepoPath(repoPath)
+	if want == "" {
+		return RepoOverride{}
+	}
+	for key, ov := range c.Repos {
+		if normalizeRepoPath(key) == want {
+			return ov
+		}
+	}
+	return RepoOverride{}
+}
+
+// EffectiveDefaultBranch returns the default branch that should drive the
+// pipeline for repoPath: the global per-repo override when set, otherwise the
+// value recorded in the repos table.
+//
+// The override is resolved on every read rather than written back into the DB
+// row: the row records what the server answered for HEAD, and `no-mistakes
+// init` rewrites it from the server on every refresh, so a value written there
+// would be silently reverted. Keeping the maintainer's stance in the config
+// file gives it one owner and makes editing the file take effect on the next
+// run with no re-init.
+func (c *GlobalConfig) EffectiveDefaultBranch(repoPath, recorded string) string {
+	if override := strings.TrimSpace(c.RepoOverrideFor(repoPath).DefaultBranch); override != "" {
+		return override
+	}
+	return recorded
+}
+
+// AllowRepoCommandsFor returns the effective allow_repo_commands opt-in for
+// repoPath: the global per-repo override when configured, otherwise the value
+// from the trusted default-branch copy of .no-mistakes.yaml. The pushed branch
+// is not an input here and must never become one.
+func (c *GlobalConfig) AllowRepoCommandsFor(repoPath string, trusted bool) bool {
+	if ov := c.RepoOverrideFor(repoPath); ov.AllowRepoCommands != nil {
+		return *ov.AllowRepoCommands
+	}
+	return trusted
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -84,6 +188,8 @@ type globalConfigRaw struct {
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
 	Verify               VerifyRaw           `yaml:"verify"`
+
+	Repos map[string]RepoOverride `yaml:"repos"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -911,6 +1017,7 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
 	cfg.Verify = raw.Verify
+	cfg.Repos = raw.Repos
 
 	return cfg, nil
 }

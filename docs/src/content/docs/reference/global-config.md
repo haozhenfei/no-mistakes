@@ -62,6 +62,11 @@ test:
     dir: .no-mistakes/evidence
     # upload_cmd: /opt/no-mistakes/upload-evidence.sh
     # upload_timeout: 2m
+
+repos:
+  /Users/you/projects/monorepo:
+    allow_repo_commands: true
+    default_branch: integration/2026-07
 ```
 
 ## Fields
@@ -355,6 +360,38 @@ The full hook contract - how the file path is passed, how the URL is read back, 
 Setting it here is trusted by definition (this is your own file on your own machine); in a repo config it is read only from the trusted default branch.
 
 These are global defaults. Per-repo config can override any of these fields.
+
+### repos
+
+Per-repo overrides, keyed by the repository's working path (the directory you ran `no-mistakes init` in).
+The path is matched after cleaning it, expanding a leading `~`, and resolving symlinks, so `/var/...` and `/private/var/...` spellings of the same directory match.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                              | Type     | Default | Description                                                                            |
+| ---------------------------------- | -------- | ------- | -------------------------------------------------------------------------------------- |
+| `repos.<path>.allow_repo_commands` | `bool`   | unset   | Overrides `allow_repo_commands` from the repo's trusted default-branch `.no-mistakes.yaml` |
+| `repos.<path>.default_branch`      | `string` | unset   | Overrides the default branch recorded at `init` time, used as the rebase base, the diff base, and the PR base |
+
+Both fields are unset by default: `allow_repo_commands` then comes from the trusted default-branch copy of `.no-mistakes.yaml`, and the default branch stays the one the server reported for `HEAD` when you ran `no-mistakes init`.
+When you do set them here, they win — including setting `allow_repo_commands: false` to turn off an opt-in the default branch has switched on.
+
+The overrides are read on every run and never written back into the daemon's database.
+That row records what the server answered for `HEAD`, and `no-mistakes init` rewrites it from the server on each refresh, so a value stored there would be silently reverted; keeping the override in this file gives it one owner and makes an edit take effect on the next run with no re-init.
+
+#### Why this is safe to put in the global config
+
+These are the two settings a contributor must never control: `allow_repo_commands` decides whether `commands.{test,lint,format}` and `agent` are honored from a pushed branch (they run via `sh -c` on your machine, with your credentials), and `default_branch` decides what every diff and rebase is computed against.
+That is why they are read from the *trusted* default-branch copy of `.no-mistakes.yaml`, never from the pushed branch.
+
+`~/.no-mistakes/config.yaml` is exactly as unreachable to a contributor as the default branch is: only the owner of the machine running the daemon can write it, and nothing in a pushed branch can reach it.
+So a maintainer stance expressed here is **trust-equivalent** to the same stance expressed on the default branch — the decision stays with the maintainer in both cases — while dropping the requirement to land a commit on the default branch.
+
+That requirement was a deadlock: enabling pushed-branch commands meant setting `allow_repo_commands: true` on the default branch, and repos with a frozen default branch (nobody merges to it) could never set it.
+The `repos:` block opens the same door from the side only the maintainer has a key to.
+A pushed branch still cannot set either field, whatever it puts in its own `.no-mistakes.yaml` (regression tests: `TestGlobalRepoOverride_PushedBranchCannotSetEither`, `TestRepoConfig_CannotCarryGlobalRepoOverrides`).
 
 ## Environment variables
 

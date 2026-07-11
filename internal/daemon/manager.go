@@ -104,11 +104,37 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 	return plans
 }
 
+// loadRepo reads a repo record and applies the maintainer-owned per-repo
+// overrides from the global config before anyone reads it. Today that is
+// repos.<working_path>.default_branch: it must be applied here, at the single
+// point where the record enters the daemon, because repo.DefaultBranch drives
+// the trusted-config fetch, the rebase base, every diff base, and the PR base.
+// The DB row is never rewritten — see config.GlobalConfig.EffectiveDefaultBranch
+// for why the override is resolved on each read.
+// An unreadable global config is NOT reported here: the callers own the run
+// lifecycle, and startRun/loadRecoveredConfig load the same config again and
+// fail the run with a "parse global config" error that the user can see on the
+// run row. Failing earlier would lose that row entirely, and the override is
+// moot on a run that cannot start.
+func (m *RunManager) loadRepo(id string) (*db.Repo, error) {
+	repo, err := m.db.GetRepo(id)
+	if err != nil || repo == nil {
+		return repo, err
+	}
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		slog.Warn("failed to load global config while reading repo; per-repo overrides not applied", "repo_id", id, "error", err)
+		return repo, nil
+	}
+	repo.DefaultBranch = globalCfg.EffectiveDefaultBranch(repo.WorkingPath, repo.DefaultBranch)
+	return repo, nil
+}
+
 func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
 	}
-	repo, err := m.db.GetRepo(run.RepoID)
+	repo, err := m.loadRepo(run.RepoID)
 	if err != nil {
 		return nil, fmt.Errorf("get repo: %w", err)
 	}
@@ -202,8 +228,27 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		}
 	}
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, workDir, trustedSHA, run.ID)
-	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
+	allowRepoCommands := resolveAllowRepoCommands(globalCfg, repo, trustedRepoCfg)
 	return config.Merge(globalCfg, config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)), nil
+}
+
+// resolveAllowRepoCommands decides whether the pushed branch's commands/agent
+// may run. Both inputs are maintainer-controlled and the pushed branch is not
+// among them: the global config's per-repo override wins when configured (only
+// the owner of the daemon host can write ~/.no-mistakes/config.yaml), otherwise
+// the trusted default-branch copy of .no-mistakes.yaml decides.
+//
+// The global override exists because the default-branch-only switch was a
+// deadlock for repos whose default branch is frozen: enabling pushed-branch
+// commands required a commit to the very branch nobody may commit to. It is not
+// a weakening — the global config is exactly as unreachable to a contributor as
+// the default branch is.
+func resolveAllowRepoCommands(globalCfg *config.GlobalConfig, repo *db.Repo, trusted *config.RepoConfig) bool {
+	trustedAllow := trusted != nil && trusted.AllowRepoCommands
+	if repo == nil {
+		return trustedAllow
+	}
+	return globalCfg.AllowRepoCommandsFor(repo.WorkingPath, trustedAllow)
 }
 
 func newPipelineAgent(ctx context.Context, cfg *config.Config) (agent.Agent, error) {
@@ -352,7 +397,7 @@ func (m *RunManager) HandleResume(ctx context.Context, repoID, branch, headSHA, 
 	if m.shuttingDown.Load() {
 		return nil, fmt.Errorf("daemon is shutting down")
 	}
-	repo, err := m.db.GetRepo(repoID)
+	repo, err := m.loadRepo(repoID)
 	if err != nil {
 		return nil, fmt.Errorf("get repo: %w", err)
 	}
@@ -738,7 +783,7 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 		return "", err
 	}
 
-	repo, err := m.db.GetRepo(repoID)
+	repo, err := m.loadRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
 	}
@@ -753,7 +798,7 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 // HandleRerun creates a new run for the latest gate head on a branch. An
 // optional intent is stamped onto the new run.
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent string) (string, error) {
-	repo, err := m.db.GetRepo(repoID)
+	repo, err := m.loadRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
 	}
@@ -920,15 +965,17 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// EffectiveRepoConfig replaces commands + agent with the trusted
 	// default-branch values unless the maintainer has explicitly opted in.
 	//
-	// allow_repo_commands is itself read ONLY from the trusted copy: a
-	// contributor cannot self-enable it from the pushed branch. With no
-	// trusted copy (fetch failed, no default branch, or no file on it) the
-	// opt-in is false and commands/agent are forced empty — fail closed.
+	// allow_repo_commands is read ONLY from maintainer-controlled sources —
+	// the global config's per-repo override, else the trusted default-branch
+	// copy (resolveAllowRepoCommands). A contributor cannot self-enable it from
+	// the pushed branch. With no trusted copy (fetch failed, no default branch,
+	// or no file on it) and no override, the opt-in is false and commands/agent
+	// are forced empty — fail closed.
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
-	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
+	allowRepoCommands := resolveAllowRepoCommands(globalCfg, repo, trustedRepoCfg)
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	if allowRepoCommands {
-		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/agent from pushed branch", "run_id", run.ID, "branch", branch)
+		slog.Warn("allow_repo_commands is enabled by the maintainer: honoring commands/agent from pushed branch", "run_id", run.ID, "branch", branch)
 	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) {
 		// Surface the silent override so a maintainer who shipped a commands.*
 		// or agent change on a feature branch understands why it did not run.
