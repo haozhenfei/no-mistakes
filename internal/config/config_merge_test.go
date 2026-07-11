@@ -106,6 +106,27 @@ func TestMerge_AutoFixDefaults(t *testing.T) {
 	}
 }
 
+func TestMerge_VerifySkepticsDefaultsToOne(t *testing.T) {
+	global := &GlobalConfig{Agent: types.AgentClaude, CITimeout: 4 * time.Hour, LogLevel: "info"}
+	repo := &RepoConfig{}
+
+	cfg := Merge(global, repo)
+	if cfg.Verify.Skeptics != 1 {
+		t.Errorf("skeptics = %d, want 1 (no majority vote by default)", cfg.Verify.Skeptics)
+	}
+}
+
+func TestMerge_VerifySkepticsOverride(t *testing.T) {
+	three := 3
+	global := &GlobalConfig{Agent: types.AgentClaude, CITimeout: 4 * time.Hour, LogLevel: "info"}
+	repo := &RepoConfig{Verify: VerifyRaw{Skeptics: &three}}
+
+	cfg := Merge(global, repo)
+	if cfg.Verify.Skeptics != 3 {
+		t.Errorf("skeptics = %d, want 3 (explicit override)", cfg.Verify.Skeptics)
+	}
+}
+
 func TestMerge_AutoFixGlobalOverridesDefaults(t *testing.T) {
 	five := 5
 	zero := 0

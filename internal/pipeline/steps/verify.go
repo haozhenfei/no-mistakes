@@ -20,9 +20,12 @@ import (
 
 // VerifyStep is the adversarial core-verification gate (design §4.4a). For each
 // evidence-bound claim and each semantic review finding it spawns N independent
-// skeptics whose job is to REFUTE — to argue the evidence does NOT support the
-// statement. A majority vote decides CONFIRMED / PLAUSIBLE / REFUTED, recorded
-// on the claim and in a verdict ledger. A REFUTED item becomes an error finding
+// skeptics (verify.skeptics, default 1) whose job is to REFUTE — to argue the
+// evidence does NOT support the statement. The votes decide CONFIRMED /
+// PLAUSIBLE / REFUTED, recorded on the claim and in a verdict ledger; the
+// majority vote of design §4.4a only takes effect at skeptics >= 3, and at the
+// default of 1 the single skeptic's verdict is final with nothing to outvote a
+// misjudgment. A REFUTED item becomes an error finding
 // carrying the refutation rationale + involved evidence IDs and parks the run
 // through the existing awaiting_approval mechanism; recovery uses only the
 // existing primitives (a within-step fix round bounded by auto_fix.verify, or a
@@ -98,7 +101,7 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
 	}
 
-	skeptics := 3
+	skeptics := 1
 	if sctx.Config != nil && sctx.Config.Verify.Skeptics > 0 {
 		skeptics = sctx.Config.Verify.Skeptics
 	}
@@ -187,7 +190,8 @@ func (s *VerifyStep) runCoverageAudit(sctx *pipeline.StepContext) ([]Finding, st
 }
 
 // adjudicate runs the skeptics and returns the majority verdict, a combined
-// rationale, and the individual votes.
+// rationale, and the individual votes. With the default of one skeptic the
+// "majority" is that single vote.
 func (s *VerifyStep) adjudicate(ctx context.Context, sctx *pipeline.StepContext, target verifyTarget, skeptics int) (string, string, []string) {
 	evidenceCtx := s.renderEvidenceContext(sctx.WorkDir, target)
 	votes := make([]string, 0, skeptics)
