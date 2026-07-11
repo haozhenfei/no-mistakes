@@ -177,6 +177,8 @@ manifest 解决四个问题：**溯源**、**防挪用**（hash + run_id + commi
 
 ### 4.3 qa（qa-changes 进流水线）
 
+> **实现状态（与本节设计不同）**：独立的 `qa` step 已从流水线删除。它跑的是一个 agent，与 `test` 步骤的 evidence agent 共用同一个 worktree、同一份 base..head diff、同一套证据命令和同一份 findings schema，只多出可达性分诊与覆盖账本四态标注这两项记账纪律——这两项已并入 `test` 的 evidence agent prompt。本节其余内容作为设计记录保留；流水线现状以 `docs/src/content/docs/reference/pipeline-steps.md` 为准。
+
 qa-changes 的四阶段流程整体保留，从「手动 skill」变为 pipeline gate；SKILL.md 转为该 step 的 agent prompt 与操作手册（dev-proxy 手册原样保留）。
 
 **沿用的现有资产**：四阶段结构、用例台账四态判定、「代码级佐证不计入通过」纪律、「三次实质不同尝试才可放弃、放弃必须附真实失败输出」规则、代理链路自检（升级进采集器，§3.2）。

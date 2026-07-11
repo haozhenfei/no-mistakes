@@ -158,15 +158,19 @@ type Commands struct {
 // AutoFixRaw is the YAML representation of auto-fix config.
 // Pointer fields distinguish "not set" (nil) from "set to 0" (disabled).
 type AutoFixRaw struct {
-	Lint     *int `yaml:"lint"`
-	Test     *int `yaml:"test"`
-	QA       *int `yaml:"qa"`
-	Review   *int `yaml:"review"`
-	Verify   *int `yaml:"verify"`
-	Document *int `yaml:"document"`
-	CI       *int `yaml:"ci"`
-	Babysit  *int `yaml:"babysit"`
-	Rebase   *int `yaml:"rebase"`
+	Lint *int `yaml:"lint"`
+	Test *int `yaml:"test"`
+	// QADeprecated accepts the auto_fix.qa key from configs written before the qa
+	// step was folded into test. It is parsed and ignored: the global config
+	// decoder runs with KnownFields(true), so dropping the key outright would make
+	// every already-installed ~/.no-mistakes/config.yaml fail to load.
+	QADeprecated *int `yaml:"qa"`
+	Review       *int `yaml:"review"`
+	Verify       *int `yaml:"verify"`
+	Document     *int `yaml:"document"`
+	CI           *int `yaml:"ci"`
+	Babysit      *int `yaml:"babysit"`
+	Rebase       *int `yaml:"rebase"`
 }
 
 // AutoFix holds resolved per-step auto-fix attempt limits.
@@ -174,7 +178,6 @@ type AutoFixRaw struct {
 type AutoFix struct {
 	Lint     int
 	Test     int
-	QA       int
 	Review   int
 	Verify   int
 	Document int
@@ -379,7 +382,6 @@ auto_fix:
   rebase: 3
   lint: 3
   test: 3
-  qa: 3
   review: 0
   verify: 0
   document: 3
@@ -388,7 +390,7 @@ auto_fix:
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,
 # Copilot CLI), pick the session that produced the change, summarize the user
-# intent, and feed it to review, test, qa, document, lint, and PR agents so they
+# intent, and feed it to review, test, document, lint, and PR agents so they
 # understand what you were trying to do - not just the diff.
 intent:
   enabled: true
@@ -1064,7 +1066,6 @@ func autoFixDefaults() AutoFix {
 	return AutoFix{
 		Lint:     3,
 		Test:     3,
-		QA:       3,
 		Review:   0,
 		Verify:   0,
 		Document: 3,
@@ -1080,9 +1081,6 @@ func applyAutoFixOverrides(dst *AutoFix, src *AutoFixRaw) {
 	}
 	if src.Test != nil {
 		dst.Test = *src.Test
-	}
-	if src.QA != nil {
-		dst.QA = *src.QA
 	}
 	if src.Review != nil {
 		dst.Review = *src.Review
@@ -1109,8 +1107,6 @@ func (c *Config) AutoFixLimit(step types.StepName) int {
 		return c.AutoFix.Lint
 	case types.StepTest:
 		return c.AutoFix.Test
-	case types.StepQA:
-		return c.AutoFix.QA
 	case types.StepReview:
 		return c.AutoFix.Review
 	case types.StepVerify:
