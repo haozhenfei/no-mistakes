@@ -161,6 +161,7 @@ Safest local verification sequence after non-trivial changes:
 - Unsupported languages degrade honestly: the run is recorded as captured command output with NO coverage attached (never fabricate), and affected hunks stay static/attested. Only Go + lcov have parsers; the format registry is `coverage.Parse`/`SupportedFormat`.
 - Static-verified rigor (§4.4c c) is enforced in `covaudit.classifyEvidence`: a static-verified hunk must hang off a captured command-output/coverage evidence entry (a real typecheck/AST run), not an attested prose note.
 - Regressions: `internal/coverage/*_test.go` (hunk intersection, four-state audit, backfill downgrade/promote), `internal/covaudit/covaudit_test.go` (real `go test -coverprofile` end-to-end), `internal/db/coverage_test.go`, `internal/evidence/coverage_test.go` (parse + sign/tamper), `internal/cli/coverage_test.go`, dossier coverage-section tests.
+- `evidence` and `claim` are worktree-side clients (`internal/cli/evidence.go`, `claim.go`, `inrun.go`): they open the DB and evidence store in the CLI process and must stay **daemon-independent** — no `daemon.EnsureDaemon`, no singleton NM_HOME lock (`internal/daemon/lock.go`). A daemon is always live when an in-run agent reaches test/verify, so a command that needs the daemon gone is a command the agent can never call. Regression: e2e `TestEvidenceCommandsWorkWhileDaemonRuns` (runs them from the user clone and from inside a gate-parked run's managed worktree).
 
 **When Making Changes**
 
