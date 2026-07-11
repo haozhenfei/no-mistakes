@@ -233,8 +233,9 @@ type VerifyRaw struct {
 }
 
 // Verify is the resolved verify-step config. Skeptics is the number of
-// independent adversarial evaluations run per claim; majority vote decides the
-// verdict (design §4.4a).
+// independent adversarial evaluations run per claim; the majority vote of design
+// §4.4a only decides the verdict when skeptics >= 3. The default is 1, i.e. a
+// single skeptic's judgment is final.
 type Verify struct {
 	Skeptics int
 }
@@ -1039,10 +1040,13 @@ func applyTestOverrides(dst *Test, src *TestRaw) {
 	}
 }
 
-// verifyDefaults returns the default verify-step settings. Three independent
-// skeptics per claim is the design default (§4.4a).
+// verifyDefaults returns the default verify-step settings. One skeptic per claim
+// is the default: it is a single adversarial pass, NOT the majority vote of
+// design §4.4a — with one voter there is no second opinion to correct a
+// misjudgment. Majority vote only holds once skeptics >= 3; raise the setting to
+// get it back, at N x the agent calls per claim.
 func verifyDefaults() Verify {
-	return Verify{Skeptics: 3}
+	return Verify{Skeptics: 1}
 }
 
 // applyVerifyOverrides applies non-nil raw values onto resolved defaults. A
