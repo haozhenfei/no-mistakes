@@ -1,12 +1,14 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/claims"
@@ -109,7 +111,15 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	var findings []Finding
 	var refuted, plausible, confirmed int
 	for _, target := range targets {
-		verdict, rationale, votes := s.adjudicate(ctx, sctx, target, skeptics)
+		verdict, rationale, votes, err := s.adjudicate(ctx, sctx, target, skeptics)
+		if err != nil {
+			// "Could not verify" is NOT "verified". A skeptic that never ran has
+			// cast no vote, so there is nothing to adjudicate and no verdict to
+			// record: fail the step loudly instead of laundering an
+			// infrastructure failure into an optimistic verdict that lets the
+			// pipeline through. See runSkeptic.
+			return nil, fmt.Errorf("verification did not run: %w", err)
+		}
 		s.record(sctx, target, verdict, rationale, votes)
 
 		switch verdict {
@@ -163,10 +173,28 @@ func (s *VerifyStep) runCoverageAudit(sctx *pipeline.StepContext) ([]Finding, st
 	if sctx.DB == nil || sctx.Paths == nil || sctx.Run == nil {
 		return nil, ""
 	}
-	res, err := covaudit.Run(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, sctx.Paths.EvidenceKeyFile(), sctx.Run.BaseSHA, sctx.Run.HeadSHA)
+	// Run.BaseSHA is the post-receive hook's "old" SHA, which is all-zero for
+	// the first push of a branch; handing that to `git diff` yields "Invalid
+	// revision range" and the audit never runs. Every other step resolves it
+	// the same way — see resolveBranchBaseSHA.
+	var defaultBranch string
+	if sctx.Repo != nil {
+		defaultBranch = sctx.Repo.DefaultBranch
+	}
+	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, defaultBranch)
+	res, err := covaudit.Run(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, sctx.Paths.EvidenceKeyFile(), baseSHA, sctx.Run.HeadSHA)
 	if err != nil {
-		sctx.Log(fmt.Sprintf("verify: coverage audit skipped: %v", err))
-		return nil, ""
+		// A coverage audit that could not run is not a coverage audit that
+		// passed. It stays non-parking (per the step contract above), but it
+		// must be visible as a finding — "skipped" in a log line reads as
+		// "nothing to report", which is exactly the silent-degradation shape
+		// this step is supposed to defend against.
+		sctx.Log(fmt.Sprintf("verify: coverage audit could not run: %v", err))
+		return []Finding{{
+			Severity:    "warning",
+			Action:      types.ActionNoOp,
+			Description: fmt.Sprintf("coverage audit did not run — code coverage was NOT evaluated for this change: %v", err),
+		}}, "coverage audit did not run"
 	}
 	if res.Report.TotalHunks == 0 {
 		return nil, ""
@@ -191,21 +219,34 @@ func (s *VerifyStep) runCoverageAudit(sctx *pipeline.StepContext) ([]Finding, st
 
 // adjudicate runs the skeptics and returns the majority verdict, a combined
 // rationale, and the individual votes. With the default of one skeptic the
-// "majority" is that single vote.
-func (s *VerifyStep) adjudicate(ctx context.Context, sctx *pipeline.StepContext, target verifyTarget, skeptics int) (string, string, []string) {
+// "majority" is that single vote. An error means at least one skeptic could not
+// be evaluated at all, so no verdict was reached — the caller must fail, never
+// substitute a default verdict.
+func (s *VerifyStep) adjudicate(ctx context.Context, sctx *pipeline.StepContext, target verifyTarget, skeptics int) (string, string, []string, error) {
 	evidenceCtx := s.renderEvidenceContext(sctx.WorkDir, target)
 	votes := make([]string, 0, skeptics)
 	rationales := make([]string, 0, skeptics)
 	for i := 0; i < skeptics; i++ {
-		v := s.runSkeptic(ctx, sctx, target, evidenceCtx, i+1, skeptics)
+		v, err := s.runSkeptic(ctx, sctx, target, evidenceCtx, i+1, skeptics)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("skeptic %d of %d could not evaluate %q: %w", i+1, skeptics, target.text, err)
+		}
 		votes = append(votes, v.Verdict)
 		rationales = append(rationales, v.Rationale) // kept parallel to votes
 	}
 	verdict := majorityVerdict(votes)
-	return verdict, chooseRationale(verdict, votes, rationales), votes
+	return verdict, chooseRationale(verdict, votes, rationales), votes, nil
 }
 
-func (s *VerifyStep) runSkeptic(ctx context.Context, sctx *pipeline.StepContext, target verifyTarget, evidenceCtx string, n, total int) skeptic {
+// runSkeptic evaluates one skeptic. It returns an error — never a fabricated
+// verdict — whenever the skeptic did not actually produce a judgment: the agent
+// failed to start or crashed (infrastructure), or it returned no parseable
+// structured output. "The verification failed" and "the verification could not
+// be performed" are different facts, and only the first may be reported as a
+// verdict. Reporting the second as PLAUSIBLE (as this used to) made a verify
+// step in which zero skeptics ran report `completed` with a "plausible" verdict
+// and pass the gate.
+func (s *VerifyStep) runSkeptic(ctx context.Context, sctx *pipeline.StepContext, target verifyTarget, evidenceCtx string, n, total int) (skeptic, error) {
 	prompt := fmt.Sprintf(`You are skeptic %d of %d, an INDEPENDENT reviewer whose job is to REFUTE a claim, not to agree with it.
 
 The claim under scrutiny:
@@ -223,27 +264,36 @@ Your task:
 - Provide a one-sentence rationale.`, n, total, target.text, evidenceCtx)
 
 	result, err := sctx.Agent.Run(ctx, agent.RunOpts{
-		Prompt:     prompt,
+		// A NUL byte anywhere in argv makes exec fail with EINVAL
+		// ("fork/exec ...: invalid argument"), which would kill every skeptic
+		// for this target. renderEvidenceContext already refuses to inline
+		// binary artifacts; this is the last-resort scrub for anything else
+		// (claim text, finding text) that reaches the prompt.
+		Prompt:     stripNUL(prompt),
 		CWD:        sctx.WorkDir,
 		JSONSchema: skepticSchema,
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
-		// A skeptic that fails to run cannot vote to confirm; treat it as a
-		// conservative PLAUSIBLE so one flaky call neither refutes nor rubber
-		// stamps.
-		sctx.Log(fmt.Sprintf("verify: skeptic %d failed: %v", n, err))
-		return skeptic{Verdict: claims.VerdictPlausible, Rationale: "skeptic evaluation failed to run"}
+		sctx.Log(fmt.Sprintf("verify: skeptic %d of %d failed to run: %v", n, total, err))
+		return skeptic{}, err
 	}
 	var out skeptic
-	if result.Output != nil {
-		if err := json.Unmarshal(result.Output, &out); err != nil {
-			out = skeptic{}
-		}
+	if len(result.Output) == 0 {
+		return skeptic{}, fmt.Errorf("skeptic returned no structured verdict")
+	}
+	if err := json.Unmarshal(result.Output, &out); err != nil {
+		return skeptic{}, fmt.Errorf("skeptic returned unparseable output: %w", err)
+	}
+	if strings.TrimSpace(out.Verdict) == "" {
+		return skeptic{}, fmt.Errorf("skeptic returned an empty verdict")
 	}
 	out.Verdict = normalizeVerdict(out.Verdict)
-	return out
+	return out, nil
 }
+
+// stripNUL removes NUL bytes, which cannot appear in an exec argv.
+func stripNUL(s string) string { return strings.ReplaceAll(s, "\x00", "") }
 
 func (s *VerifyStep) record(sctx *pipeline.StepContext, target verifyTarget, verdict, rationale string, votes []string) {
 	if sctx.DB == nil {
@@ -342,8 +392,12 @@ func (s *VerifyStep) renderEvidenceContext(workDir string, target verifyTarget) 
 			fmt.Fprintf(&b, " command: %s (exit %d)", strings.Join(e.Argv, " "), e.ExitCode)
 		}
 		b.WriteString("\n")
-		if snippet := readEvidenceSnippet(workDir, e); snippet != "" {
+		snippet, notes := readEvidenceSnippet(workDir, e)
+		if snippet != "" {
 			fmt.Fprintf(&b, "  output:\n%s\n", indentLines(snippet, "    "))
+		}
+		for _, note := range notes {
+			fmt.Fprintf(&b, "  %s\n", note)
 		}
 	}
 	return b.String()
@@ -390,8 +444,18 @@ func verdictSubjectID(target verifyTarget) string {
 	return "finding:" + target.text
 }
 
-func readEvidenceSnippet(workDir string, e evidence.LoadedEntry) string {
+// readEvidenceSnippet returns a text snippet from the first readable *text*
+// artifact of e, plus one note per artifact that exists but cannot be inlined.
+//
+// Binary artifacts (screenshots are the common case: `evidence attach` accepts
+// any file) are NEVER inlined. Their bytes would land verbatim in the skeptic
+// agent's argv, and a single NUL byte — a PNG has one at offset 8 — makes exec
+// fail with EINVAL, surfacing as `fork/exec <agent>: invalid argument`. That
+// killed every skeptic for any claim citing a screenshot, while the other
+// pipeline steps (which never inline evidence) ran the same agent fine.
+func readEvidenceSnippet(workDir string, e evidence.LoadedEntry) (string, []string) {
 	const maxSnippet = 1500
+	var notes []string
 	for _, p := range e.Paths {
 		full := p
 		if !filepath.IsAbs(p) {
@@ -401,6 +465,10 @@ func readEvidenceSnippet(workDir string, e evidence.LoadedEntry) string {
 		if err != nil {
 			continue
 		}
+		if isBinary(data) {
+			notes = append(notes, fmt.Sprintf("artifact %s: binary file (%d bytes) — content not shown here; judge it from the label and the other evidence, and do not assume it supports the claim", filepath.Base(p), len(data)))
+			continue
+		}
 		text := strings.TrimSpace(string(data))
 		if text == "" {
 			continue
@@ -408,9 +476,15 @@ func readEvidenceSnippet(workDir string, e evidence.LoadedEntry) string {
 		if len(text) > maxSnippet {
 			text = text[:maxSnippet] + "\n…(truncated)"
 		}
-		return text
+		return text, notes
 	}
-	return ""
+	return "", notes
+}
+
+// isBinary reports content that must not be pasted into a prompt: anything with
+// a NUL byte (fatal for exec argv) or that is not valid UTF-8.
+func isBinary(data []byte) bool {
+	return bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data)
 }
 
 func indentLines(s, prefix string) string {
