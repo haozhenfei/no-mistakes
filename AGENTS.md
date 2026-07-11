@@ -33,6 +33,13 @@ Safest local verification sequence after non-trivial changes:
 - Prefer `bytedcli --json codebase ...`. Two output quirks bit us: bytedcli prints node runtime warnings (incl. `[UNDICI-EHPA]`, which contains `[`) on **stderr**, so JSON calls capture **stdout only** (`Host.runJSON`) - never `CombinedOutput`, or the `[` would defeat brace-seeking. And field casing differs by command: `mr list`/`mr get` use CapitalCase (`Number`, `SourceBranchName`, empty `URL`) while `mr status` uses lowercase (`status`, `source_branch`, populated `url`). `FindPR`/`CreatePR` synthesize the MR URL as `https://<host>/<repo>/merge_requests/<n>` when the payload omits it.
 - `mr status` is the single source for `GetPRState` + `GetMergeableState` + `GetChecks` (one call returns `merge_request.status`, `mergeability`, and `check_runs.items[]`). Checks use GitHub-style check-run vocab but with `succeeded` (not `success`); `neutral` is non-failing. Failed-check logs come from `bytedcli codebase checks log --check-run-id <id>` (plain text on stdout; best-effort, empty when the check has no resolvable step logs, e.g. pipeline atom logs live in Orca). Fork MR routing is intentionally unwired (mirrors GitLab/Bitbucket/Azure).
 
+**CI Lives in Two Places**
+
+- This repo has two live remotes and two CI systems. `.codebase/pipelines/ci.yaml` is the CI that runs on `code.byted.org/obric/no-mistakes` (Codebase, backed by Bits Pipeline — it is neither GitHub Actions nor GitLab CI); `.github/workflows/` still runs on the GitHub mirror and exclusively owns release-please, GitHub Releases, and GitHub Pages deploy. Neither runs the other's config; **do not delete `.github/workflows/`**.
+- A change to `check`/`test`/`e2e`/docs-build behavior must be made in **both**, or the two sides silently drift.
+- Each Codebase job surfaces on the MR as a check run named `[Pipeline] <pipeline name> - <job name>`. Read them with `bytedcli codebase mr status <n>` — the same call `internal/scm/codebase` makes. `mr get`'s `CheckRunSummaryStatus` is **always** null on every repo; never use it to decide whether checks exist.
+- Codebase coverage is Linux-only; the ubuntu/macos/windows matrix survives only on the GitHub mirror.
+
 **Documentation**
 
 - Keep `README.md` concise and high-level; the bar needs to be extremely high for what shows up there.
