@@ -206,6 +206,11 @@ func writeIntentScenario(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "intent_scenario.yaml")
 	content := `actions:
+  - match: "whose job is to REFUTE"
+    text: "the evidence supports the claim"
+    structured:
+      verdict: CONFIRMED
+      rationale: "fakeagent: the captured evidence supports the claim"
   - match: "transcript of a developer's recent conversation with a coding agent"
     text: "summarized"
     structured:
