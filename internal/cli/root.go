@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -118,7 +119,7 @@ func findRepo(d *db.DB) (*db.Repo, error) {
 		return nil, fmt.Errorf("get repo: %w", err)
 	}
 	if repo != nil {
-		return repo, nil
+		return applyRepoOverrides(repo), nil
 	}
 	// Try the main worktree root (handles git worktrees).
 	mainRoot, err := git.FindMainRepoRoot(".")
@@ -132,7 +133,26 @@ func findRepo(d *db.DB) (*db.Repo, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("repo not initialized (run 'no-mistakes init' first)")
 	}
-	return repo, nil
+	return applyRepoOverrides(repo), nil
+}
+
+// applyRepoOverrides applies the maintainer's per-repo global-config overrides
+// to a repo record so the CLI reports the same default branch the daemon uses
+// for rebase and diff bases (see config.GlobalConfig.EffectiveDefaultBranch).
+// A config the CLI cannot read leaves the recorded value in place: this is a
+// read-only display and gating concern here, and the daemon fails the run loudly
+// on a broken config anyway.
+func applyRepoOverrides(repo *db.Repo) *db.Repo {
+	p, err := paths.New()
+	if err != nil {
+		return repo
+	}
+	globalCfg, err := config.LoadGlobal(p.ConfigFile())
+	if err != nil {
+		return repo
+	}
+	repo.DefaultBranch = globalCfg.EffectiveDefaultBranch(repo.WorkingPath, repo.DefaultBranch)
+	return repo
 }
 
 // openResources initializes paths, ensures directories exist, and opens the DB.
