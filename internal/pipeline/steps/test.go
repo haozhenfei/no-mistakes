@@ -26,6 +26,24 @@ const evidenceVaultGuidance = `- Produce your end-to-end evidence through the Ev
 - A claim with no evidence is demoted to a self-attested note and can never appear in the review conclusions, so always cite the evidence IDs you captured.
 - The signed manifest entries and registered claims are the record the verification gate checks; free-text in "tested" is a convenience summary only and does not stand in for captured evidence.`
 
+// coverageLedgerGuidance carries the evidence-accounting discipline that used to
+// live in the separate qa step (Evidence-Based Review v2 §4.3): reachability
+// triage plus a four-state coverage-ledger row per changed hunk. The qa step ran
+// a second agent over the same worktree, the same base..head diff, the same
+// evidence CLI, and the same findings schema as the test evidence agent, so it
+// was folded in here; only this accounting discipline was unique to it.
+const coverageLedgerGuidance = `- Triage reachability before you record any result:
+  - Mark endpoint/runtime reachability as "deterministic" only when a command, probe, or captured run established it.
+  - Mark data/account reachability and scenario semantics as "semantic"; do not call them deterministic.
+  - Record unreachable scope as findings, and as unverified coverage-ledger rows when it maps to changed hunks.
+- Record a coverage-ledger row for every changed hunk you assessed: ` + "`no-mistakes coverage add --file <path> --start <n> --end <n> --state <state> --evidence <ev-id,...> --source test`" + `.
+  - The four closed states are runtime-verified, static-verified, attested, and unverified.
+  - Use runtime-verified only when a captured coverage evidence entry can support that hunk. Capture one with ` + "`no-mistakes evidence coverage --label \"<case coverage>\" --profile <file> --format go|lcov`" + `; verify will backfill from instrumentation and downgrade unsupported runtime labels.
+  - Use static-verified only for captured executable static evidence such as typecheck or AST/tool output.
+  - Use attested for agent judgement or prose-only support, and unverified with a reason when you could not execute or assess the hunk.
+- A runtime pass MUST have captured evidence IDs and corresponding coverage-ledger support. Code-level reasoning alone MUST NOT count as a runtime pass.
+- Persist all of this through the existing findings, claims, evidence, and coverage-ledger surfaces. Do not create a parallel datastore, and do not implement or simulate green/yellow/red risk routing.`
+
 // TestStep runs baseline tests, gathers evidence for user intent, and optionally asks the agent to fix failures.
 type TestStep struct{}
 
@@ -62,6 +80,7 @@ Rules:
 - Do not refactor beyond what is needed for that root-cause fix.
 - If tests fail, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
 - Do NOT run linters, formatters, or static analysis tools.
+- If a finding is about missing behavior evidence rather than a failing test, capture the missing runtime evidence, correct the claims, or mark the relevant hunks honestly as static-verified, attested, or unverified. A runtime pass still requires captured evidence IDs and coverage-ledger support; code-level reasoning alone does not count.
 - Re-run the relevant tests before finishing.
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes.
 - Return JSON with a single "summary" field when you are done.
@@ -147,7 +166,7 @@ Previous test findings to address:
 		if evidenceLocation.StoreInRepo {
 			evidenceGuidance = fmt.Sprintf("- Write new evidence files into this in-repo evidence directory; it is committed and pushed automatically, so artifacts render directly on the PR: %s", evidenceDir)
 		}
-		evidenceGuidance += "\n" + evidenceVaultGuidance
+		evidenceGuidance += "\n" + evidenceVaultGuidance + "\n" + coverageLedgerGuidance
 		configuredTestCommand := ""
 		if testCmd != "" {
 			configuredTestCommand = fmt.Sprintf("\nConfigured test command already ran successfully as baseline: `%s`\n", testCmd)

@@ -290,7 +290,7 @@ func (e *Executor) resetRunScopedStateForResume(runID string, firstRerunStep typ
 	if firstOrder == 0 {
 		return nil
 	}
-	if firstOrder <= types.StepQA.Order() {
+	if firstOrder <= types.StepTest.Order() {
 		if err := e.db.DeleteClaimsByRun(runID); err != nil {
 			return fmt.Errorf("reset resume claims: %w", err)
 		}

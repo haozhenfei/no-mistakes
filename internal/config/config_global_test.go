@@ -436,9 +436,6 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 	if raw.AutoFix.Test == nil || *raw.AutoFix.Test != defaults.Test {
 		t.Errorf("YAML auto_fix.test = %v, Go default = %d", raw.AutoFix.Test, defaults.Test)
 	}
-	if raw.AutoFix.QA == nil || *raw.AutoFix.QA != defaults.QA {
-		t.Errorf("YAML auto_fix.qa = %v, Go default = %d", raw.AutoFix.QA, defaults.QA)
-	}
 	if raw.AutoFix.Review == nil || *raw.AutoFix.Review != defaults.Review {
 		t.Errorf("YAML auto_fix.review = %v, Go default = %d", raw.AutoFix.Review, defaults.Review)
 	}
@@ -462,7 +459,7 @@ func TestLoadGlobal_AutoFixDefaults(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// AutoFix should be nil (unset) in GlobalConfig
-	if cfg.AutoFix.Lint != nil || cfg.AutoFix.Test != nil || cfg.AutoFix.QA != nil || cfg.AutoFix.Review != nil ||
+	if cfg.AutoFix.Lint != nil || cfg.AutoFix.Test != nil || cfg.AutoFix.Review != nil ||
 		cfg.AutoFix.Verify != nil ||
 		cfg.AutoFix.Document != nil || cfg.AutoFix.CI != nil || cfg.AutoFix.Rebase != nil {
 		t.Errorf("expected all AutoFix fields to be nil for defaults, got %+v", cfg.AutoFix)
@@ -520,5 +517,45 @@ func TestLoadGlobal_AutoFixPartial(t *testing.T) {
 	// Unset fields should remain nil
 	if cfg.AutoFix.Test != nil {
 		t.Errorf("test = %v, want nil", cfg.AutoFix.Test)
+	}
+}
+
+// TestLoadGlobal_AcceptsDeprecatedAutoFixQAKey pins the compatibility contract for
+// removing the qa step: the global decoder runs with KnownFields(true), and every
+// config.yaml written by `no-mistakes init` before the removal carries auto_fix.qa,
+// so the key must still parse (and be ignored) instead of failing the load.
+func TestLoadGlobal_AcceptsDeprecatedAutoFixQAKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("auto_fix:\n  qa: 7\n  test: 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	global, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal with legacy auto_fix.qa key: %v", err)
+	}
+	cfg := Merge(global, &RepoConfig{})
+	if cfg.AutoFix.Test != 2 {
+		t.Fatalf("auto_fix.test = %d, want 2 (sibling keys still apply)", cfg.AutoFix.Test)
+	}
+	if got := cfg.AutoFixLimit(types.StepName("qa")); got != 0 {
+		t.Fatalf("AutoFixLimit(qa) = %d, want 0 (qa is no longer a step)", got)
+	}
+}
+
+// TestLoadRepoFromBytes_AcceptsDeprecatedAutoFixQAKey covers the same key in a
+// repo .no-mistakes.yaml that predates the qa-step removal.
+func TestLoadRepoFromBytes_AcceptsDeprecatedAutoFixQAKey(t *testing.T) {
+	repo, err := LoadRepoFromBytes([]byte("auto_fix:\n  qa: 0\n  lint: 1\n"))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes with legacy auto_fix.qa key: %v", err)
+	}
+	cfg := Merge(DefaultGlobalConfig(), repo)
+	if cfg.AutoFix.Lint != 1 {
+		t.Fatalf("auto_fix.lint = %d, want 1 (sibling keys still apply)", cfg.AutoFix.Lint)
+	}
+	if cfg.AutoFix.Test != 3 {
+		t.Fatalf("auto_fix.test = %d, want the default 3", cfg.AutoFix.Test)
 	}
 }

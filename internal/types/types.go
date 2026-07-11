@@ -33,7 +33,6 @@ const (
 	StepRebase   StepName = "rebase"
 	StepReview   StepName = "review"
 	StepTest     StepName = "test"
-	StepQA       StepName = "qa"
 	StepVerify   StepName = "verify"
 	StepDocument StepName = "document"
 	StepLint     StepName = "lint"
@@ -89,20 +88,18 @@ func (s StepName) Order() int {
 		return 3
 	case StepTest:
 		return 4
-	case StepQA:
-		return 5
 	case StepVerify:
-		return 6
+		return 5
 	case StepDocument:
-		return 7
+		return 6
 	case StepLint:
-		return 8
+		return 7
 	case StepPush:
-		return 9
+		return 8
 	case StepPR:
-		return 10
+		return 9
 	case StepCI:
-		return 11
+		return 10
 	default:
 		return 0
 	}
@@ -110,7 +107,7 @@ func (s StepName) Order() int {
 
 // AllSteps returns all pipeline steps in execution order.
 func AllSteps() []StepName {
-	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepQA, StepVerify, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepVerify, StepDocument, StepLint, StepPush, StepPR, StepCI}
 }
 
 // StepStatus represents the lifecycle state of a pipeline step.

@@ -91,6 +91,10 @@ Safest local verification sequence after non-trivial changes:
 - Packages whose tests can start a daemon or touch ambient state (`cmd/no-mistakes`, `internal/cli`, `internal/update`) use a package-wide `TestMain` that points `NM_HOME` and `HOME` at fresh temp dirs and disables telemetry/update-check env vars, so a full test run never touches a real `~/.no-mistakes`. Follow the same pattern in new such packages.
 - Isolate filesystem and environment state with `t.TempDir()` and `t.Setenv()`.
 
+**Removing a Global Config Key**
+
+- The global decoder runs `dec.KnownFields(true)` (`config.go` `LoadGlobal`), while repo config does not. Deleting a key's struct field therefore makes every already-installed `~/.no-mistakes/config.yaml` that still carries it fail to load - `no-mistakes init` writes the full `defaultConfigYAML`, so the key is on disk for every existing user. Keep a parsed-and-ignored deprecated field (see `AutoFixRaw.QADeprecated`) and drop the key from `defaultConfigYAML`.
+
 **Repo Config Trust Boundary (security)**
 
 - The daemon runs `commands.*` from `.no-mistakes.yaml` verbatim via `sh -c`, and `agent` selects which process launches with the maintainer's credentials. The code-executing selection fields (`commands.{test,lint,format}` and `agent`) are therefore loaded from the trusted default branch at a **pinned SHA** resolved by a fresh fetch, never from the pushed SHA; on fetch failure the trusted config is nil and `EffectiveRepoConfig` forces empty `commands`/`agent` (fail closed - a stale `origin/<default>` ref cannot serve a removed value). See `internal/daemon/manager.go` `startRun` + `loadTrustedRepoConfig`.

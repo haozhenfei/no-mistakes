@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestTestStep_FixMode(t *testing.T) {
@@ -285,5 +286,113 @@ func TestTestStep_InRepoEvidenceFallsBackWhenEvidenceDirIsIgnored(t *testing.T) 
 	}
 	if strings.Contains(prompt, "in-repo evidence directory") || strings.Contains(prompt, "committed and pushed automatically") {
 		t.Fatalf("did not expect in-repo publishing promise for ignored evidence dir, got:\n%s", prompt)
+	}
+}
+
+// TestTestStep_ConfiguredTestCommandStillCarriesCoverageLedgerDiscipline pins the
+// contract that absorbed the deleted qa step: with commands.test configured, the
+// evidence agent still runs, and its prompt still demands the reachability triage
+// and the four-state coverage-ledger accounting qa used to own.
+func TestTestStep_ConfiguredTestCommandStillCarriesCoverageLedgerDiscipline(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	testCmd := "go env GOOS > baseline.log"
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"evidence captured","tested":["ledger recorded"],"testing_summary":"coverage ledger written for changed hunks"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
+	sctx.UserIntent = "checkout returns a receipt"
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("test execute: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatal("expected no approval when the evidence agent reports no findings")
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected the evidence agent to run even with commands.test configured, got %d calls", len(ag.calls))
+	}
+
+	prompt := ag.calls[0].Prompt
+	for _, want := range []string{
+		"Mark endpoint/runtime reachability as \"deterministic\" only when a command, probe, or captured run established it",
+		"Mark data/account reachability and scenario semantics as \"semantic\"",
+		"Record a coverage-ledger row for every changed hunk you assessed",
+		"no-mistakes coverage add --file <path> --start <n> --end <n> --state <state> --evidence <ev-id,...> --source test",
+		"The four closed states are runtime-verified, static-verified, attested, and unverified",
+		"Use runtime-verified only when a captured coverage evidence entry can support that hunk",
+		"no-mistakes evidence coverage",
+		"Use static-verified only for captured executable static evidence",
+		"Code-level reasoning alone MUST NOT count as a runtime pass",
+		"Do not create a parallel datastore",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected evidence prompt to carry the coverage-ledger discipline %q, got:\n%s", want, prompt)
+		}
+	}
+
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(findings.TestingSummary, "coverage ledger") {
+		t.Fatalf("expected the agent's ledger-aware testing summary to survive into findings, got %+v", findings)
+	}
+}
+
+// TestTestStep_MissingRuntimeEvidenceFindingParks keeps the qa gate's blocking
+// semantics: a case that could not be runtime-verified parks for a decision
+// instead of passing silently.
+func TestTestStep_MissingRuntimeEvidenceFindingParks(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"runtime evidence missing for checkout case","action":"ask-user"}],"summary":"evidence incomplete","tested":["checkout case"],"testing_summary":"case could not be runtime verified"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("test execute: %v", err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("expected a missing-runtime-evidence finding to require approval")
+	}
+	if !outcome.AutoFixable {
+		t.Fatal("expected a blocking evidence finding to be auto-fixable")
+	}
+}
+
+func TestAllStepsHasNoQAStep(t *testing.T) {
+	t.Parallel()
+	want := []types.StepName{
+		types.StepIntent,
+		types.StepRebase,
+		types.StepReview,
+		types.StepTest,
+		types.StepVerify,
+		types.StepDocument,
+		types.StepLint,
+		types.StepPush,
+		types.StepPR,
+		types.StepCI,
+	}
+	steps := AllSteps()
+	if len(steps) != len(want) {
+		t.Fatalf("AllSteps returned %d steps, want %d", len(steps), len(want))
+	}
+	for i, step := range steps {
+		if step.Name() != want[i] {
+			t.Fatalf("step[%d] = %s, want %s", i, step.Name(), want[i])
+		}
 	}
 }

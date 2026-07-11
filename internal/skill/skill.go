@@ -46,7 +46,7 @@ const body = `
 # no-mistakes
 
 ` + "`no-mistakes`" + ` is a local gate that validates your code changes through a pipeline
-(intent, rebase, review, test, qa, verify, document, lint, push, PR, CI) before they reach
+(intent, rebase, review, test, verify, document, lint, push, PR, CI) before they reach
 the configured push target. You drive it through the ` + "`no-mistakes axi`" + ` command family, which prints
 machine-readable [TOON](https://toonformat.dev) to stdout and progress to stderr.
 
