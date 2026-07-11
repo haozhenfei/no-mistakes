@@ -14,7 +14,7 @@ func TestInsertRunWithSkipSteps_RoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	skips := []types.StepName{types.StepReview, types.StepQA}
+	skips := []types.StepName{types.StepReview, types.StepLint}
 	run, err := d.InsertRunWithSkipSteps(repo.ID, "feature", "head", "base", skips)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
@@ -24,7 +24,7 @@ func TestInsertRunWithSkipSteps_RoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get run: %v", err)
 	}
-	if len(got.SkipSteps) != 2 || got.SkipSteps[0] != types.StepReview || got.SkipSteps[1] != types.StepQA {
+	if len(got.SkipSteps) != 2 || got.SkipSteps[0] != types.StepReview || got.SkipSteps[1] != types.StepLint {
 		t.Fatalf("skip steps = %v, want %v", got.SkipSteps, skips)
 	}
 
