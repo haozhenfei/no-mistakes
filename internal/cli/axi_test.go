@@ -365,9 +365,10 @@ func TestSplitCSV(t *testing.T) {
 
 func TestOutcomeFor(t *testing.T) {
 	cases := map[string]string{
-		string(types.RunCompleted): "passed",
-		string(types.RunFailed):    "failed",
-		string(types.RunCancelled): "cancelled",
+		string(types.RunCompleted):   "passed",
+		string(types.RunFailed):      "failed",
+		string(types.RunCancelled):   "cancelled",
+		string(types.RunInterrupted): "interrupted",
 	}
 	for in, want := range cases {
 		if got := outcomeFor(in); got != want {

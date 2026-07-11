@@ -188,6 +188,57 @@ func TestCompleteStep(t *testing.T) {
 	}
 }
 
+func TestCompleteStepWithValidationRecordsResumeInputs(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+
+	if err := d.CompleteStepWithValidation(step.ID, types.StepStatusCompleted, 0, 1500, "/logs/run-1/review.log", "head-1", "config-1"); err != nil {
+		t.Fatalf("complete step with validation: %v", err)
+	}
+	got, _ := d.GetStepResult(step.ID)
+	if got.ValidatedHeadSHA == nil || *got.ValidatedHeadSHA != "head-1" {
+		t.Fatalf("validated_head_sha = %v, want head-1", got.ValidatedHeadSHA)
+	}
+	if got.ConfigHash == nil || *got.ConfigHash != "config-1" {
+		t.Fatalf("config_hash = %v, want config-1", got.ConfigHash)
+	}
+}
+
+func TestResetStepForResumeClearsStaleStructuredState(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"old finding"}]}`
+	if _, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 100); err != nil {
+		t.Fatalf("insert round: %v", err)
+	}
+	if err := d.CompleteStepWithValidation(step.ID, types.StepStatusCompleted, 0, 1500, "/logs/run-1/review.log", "head-1", "config-1"); err != nil {
+		t.Fatalf("complete step with validation: %v", err)
+	}
+
+	if err := d.ResetStepForResume(step.ID); err != nil {
+		t.Fatalf("reset step for resume: %v", err)
+	}
+
+	got, _ := d.GetStepResult(step.ID)
+	if got.Status != types.StepStatusPending {
+		t.Fatalf("status = %q, want pending", got.Status)
+	}
+	if got.FindingsJSON != nil || got.ValidatedHeadSHA != nil || got.ConfigHash != nil {
+		t.Fatalf("resume reset left stale step data: findings=%v head=%v config=%v", got.FindingsJSON, got.ValidatedHeadSHA, got.ConfigHash)
+	}
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatalf("get rounds: %v", err)
+	}
+	if len(rounds) != 0 {
+		t.Fatalf("rounds after resume reset = %d, want 0", len(rounds))
+	}
+}
+
 func TestCompleteStepWithStatus(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

@@ -87,3 +87,30 @@ func TestUpdateCoverageEntry(t *testing.T) {
 		t.Fatalf("downgrade metadata not persisted: %+v", got[0])
 	}
 }
+
+func TestDeleteCoverageEntriesByRun(t *testing.T) {
+	d := openTestDB(t)
+	run := newRunForClaims(t, d)
+	if _, err := d.InsertCoverageEntry(coverage.LedgerEntry{
+		RunID:     run.ID,
+		File:      "foo.go",
+		StartLine: 5,
+		EndLine:   9,
+		State:     coverage.StateRuntimeVerified,
+		Source:    "agent",
+	}); err != nil {
+		t.Fatalf("insert coverage: %v", err)
+	}
+
+	if err := d.DeleteCoverageEntriesByRun(run.ID); err != nil {
+		t.Fatalf("delete coverage entries: %v", err)
+	}
+
+	got, err := d.GetCoverageEntriesByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get coverage entries: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("coverage entries after delete = %d, want 0", len(got))
+	}
+}

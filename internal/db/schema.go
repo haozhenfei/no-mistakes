@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS step_results (
     last_activity_at INTEGER,
     last_activity    TEXT,
     agent_pid        INTEGER,
-    auto_fix_limit   INTEGER
+    auto_fix_limit   INTEGER,
+    validated_head_sha TEXT,
+    config_hash      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS step_rounds (
@@ -157,4 +159,6 @@ var migrationStatements = []string{
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN validated_head_sha TEXT`,
+	`ALTER TABLE step_results ADD COLUMN config_hash TEXT`,
 }

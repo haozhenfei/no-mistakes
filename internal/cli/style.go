@@ -23,6 +23,8 @@ func runStatusStyle(status types.RunStatus) string {
 		return sGreen.Render(s)
 	case types.RunFailed:
 		return sRed.Render(s)
+	case types.RunInterrupted:
+		return sYellow.Render(s)
 	case types.RunRunning:
 		return sBlue.Render(s)
 	default:

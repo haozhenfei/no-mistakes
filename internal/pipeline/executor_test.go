@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/claims"
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/coverage"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -40,6 +44,150 @@ func TestExecutor_StepLifecycleEvents(t *testing.T) {
 		if e := events.find(ipc.EventStepCompleted, name); e == nil {
 			t.Errorf("missing step_completed event for %s", name)
 		}
+	}
+}
+
+func TestExecutor_ResumeSkipsCompletedStepsForSameHead(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	cfg := &config.Config{Agent: types.AgentClaude}
+	hash := ConfigHash(cfg)
+
+	review := newPassStep(types.StepReview)
+	testStep := newPassStep(types.StepTest)
+	exec := NewExecutor(database, p, cfg, nil, []Step{review, testStep}, nil)
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("initial execute: %v", err)
+	}
+	if got := review.callCount(); got != 1 {
+		t.Fatalf("initial review calls = %d, want 1", got)
+	}
+	if got := testStep.callCount(); got != 1 {
+		t.Fatalf("initial test calls = %d, want 1", got)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("steps: %v", err)
+	}
+	if steps[0].ValidatedHeadSHA == nil || *steps[0].ValidatedHeadSHA != run.HeadSHA {
+		t.Fatalf("review validated head = %v, want %s", steps[0].ValidatedHeadSHA, run.HeadSHA)
+	}
+	if steps[0].ConfigHash == nil || *steps[0].ConfigHash != hash {
+		t.Fatalf("review config hash = %v, want %s", steps[0].ConfigHash, hash)
+	}
+	if err := database.UpdateRunErrorStatus(run.ID, "daemon crashed during execution", types.RunInterrupted); err != nil {
+		t.Fatalf("mark interrupted: %v", err)
+	}
+	run, _ = database.GetRun(run.ID)
+
+	resumed := NewExecutor(database, p, cfg, nil, []Step{review, testStep}, nil)
+	if err := resumed.ResumeFrom(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := review.callCount(); got != 1 {
+		t.Fatalf("review calls after resume = %d, want still 1", got)
+	}
+	if got := testStep.callCount(); got != 1 {
+		t.Fatalf("test calls after resume = %d, want still 1", got)
+	}
+}
+
+func TestExecutor_ResumeDoesNotSkipWhenHeadMoved(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	cfg := &config.Config{Agent: types.AgentClaude}
+
+	review := newPassStep(types.StepReview)
+	testStep := newPassStep(types.StepTest)
+	exec := NewExecutor(database, p, cfg, nil, []Step{review, testStep}, nil)
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("initial execute: %v", err)
+	}
+	if err := database.UpdateRunErrorStatus(run.ID, "daemon crashed during execution", types.RunInterrupted); err != nil {
+		t.Fatalf("mark interrupted: %v", err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, "moved-head"); err != nil {
+		t.Fatalf("move head: %v", err)
+	}
+	run, _ = database.GetRun(run.ID)
+
+	resumed := NewExecutor(database, p, cfg, nil, []Step{review, testStep}, nil)
+	if err := resumed.ResumeFrom(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := review.callCount(); got != 2 {
+		t.Fatalf("review calls after moved-head resume = %d, want 2", got)
+	}
+	if got := testStep.callCount(); got != 2 {
+		t.Fatalf("test calls after moved-head resume = %d, want 2", got)
+	}
+}
+
+func TestExecutor_ResumeClearsRunScopedStateWhenRerunningProducerStep(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	cfg := &config.Config{Agent: types.AgentClaude}
+
+	review := newPassStep(types.StepReview)
+	testStep := newPassStep(types.StepTest)
+	exec := NewExecutor(database, p, cfg, nil, []Step{review, testStep}, nil)
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("initial execute: %v", err)
+	}
+
+	claim, err := database.InsertClaim(claims.Claim{RunID: run.ID, Step: string(types.StepTest), Text: "old claim", Kind: claims.KindBehavior, Evidence: []string{"ev-old"}})
+	if err != nil {
+		t.Fatalf("insert stale claim: %v", err)
+	}
+	if _, err := database.InsertVerifyVerdict(db.VerifyVerdict{RunID: run.ID, ClaimID: claim.ID, Verdict: claims.VerdictConfirmed}); err != nil {
+		t.Fatalf("insert stale verify verdict: %v", err)
+	}
+	if _, err := database.InsertCoverageEntry(coverage.LedgerEntry{RunID: run.ID, File: "foo.go", StartLine: 1, EndLine: 2, State: coverage.StateRuntimeVerified}); err != nil {
+		t.Fatalf("insert stale coverage entry: %v", err)
+	}
+
+	if err := database.UpdateRunErrorStatus(run.ID, types.RunInterruptReasonDaemonCrashed, types.RunInterrupted); err != nil {
+		t.Fatalf("mark interrupted: %v", err)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("steps: %v", err)
+	}
+	if err := database.CompleteStepWithValidation(steps[0].ID, types.StepStatusCompleted, 0, 1, "", "old-head", ConfigHash(cfg)); err != nil {
+		t.Fatalf("stale review validation: %v", err)
+	}
+	if err := database.CompleteStepWithValidation(steps[1].ID, types.StepStatusCompleted, 0, 1, "", run.HeadSHA, ConfigHash(cfg)); err != nil {
+		t.Fatalf("revalidate test: %v", err)
+	}
+	run, _ = database.GetRun(run.ID)
+
+	resumed := NewExecutor(database, p, cfg, nil, []Step{review, testStep}, nil)
+	if err := resumed.ResumeFrom(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := review.callCount(); got != 2 {
+		t.Fatalf("review calls after resume = %d, want rerun", got)
+	}
+	if got := testStep.callCount(); got != 2 {
+		t.Fatalf("test calls after resume = %d, want rerun", got)
+	}
+	claims, err := database.GetClaimsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get claims: %v", err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("claims after resume = %d, want cleared", len(claims))
+	}
+	verdicts, err := database.GetVerifyVerdictsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get verdicts: %v", err)
+	}
+	if len(verdicts) != 0 {
+		t.Fatalf("verify verdicts after resume = %d, want cleared", len(verdicts))
+	}
+	coverageEntries, err := database.GetCoverageEntriesByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get coverage entries: %v", err)
+	}
+	if len(coverageEntries) != 0 {
+		t.Fatalf("coverage entries after resume = %d, want cleared", len(coverageEntries))
 	}
 }
 

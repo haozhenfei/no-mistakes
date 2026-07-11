@@ -60,6 +60,17 @@ func (d *DB) GetCoverageEntriesByRun(runID string) ([]coverage.LedgerEntry, erro
 	return out, rows.Err()
 }
 
+// DeleteCoverageEntriesByRun removes the coverage ledger for a run. Explicit
+// resume calls this before rerunning steps that can regenerate or audit the
+// ledger, avoiding stale per-hunk coverage conclusions under the same run ID.
+func (d *DB) DeleteCoverageEntriesByRun(runID string) error {
+	_, err := d.sql.Exec(`DELETE FROM coverage_entries WHERE run_id = ?`, runID)
+	if err != nil {
+		return fmt.Errorf("delete coverage entries by run: %w", err)
+	}
+	return nil
+}
+
 // UpdateCoverageEntry writes back a row's state, reason, evidence, and source by
 // ID. The verify step uses it to persist backfill corrections (a false
 // runtime-verified label downgraded to attested, or an uncovered hunk promoted

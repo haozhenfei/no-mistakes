@@ -34,7 +34,7 @@ const triggerWaitTimeout = 5 * time.Second
 // terminalStatus reports whether a run has reached a final state.
 func terminalStatus(status string) bool {
 	switch types.RunStatus(status) {
-	case types.RunCompleted, types.RunFailed, types.RunCancelled:
+	case types.RunCompleted, types.RunFailed, types.RunCancelled, types.RunInterrupted:
 		return true
 	default:
 		return false
@@ -50,6 +50,8 @@ func outcomeFor(status string) string {
 		return "failed"
 	case types.RunCancelled:
 		return "cancelled"
+	case types.RunInterrupted:
+		return "interrupted"
 	default:
 		return status
 	}
@@ -97,6 +99,74 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	return cmd
+}
+
+func newAxiResumeCmd() *cobra.Command {
+	var autoYes bool
+	var runID string
+	cmd := &cobra.Command{
+		Use:   "resume",
+		Short: "Resume a previous run for the current branch head",
+		Long: "Resumes a failed, cancelled, or interrupted run for the current branch\n" +
+			"head. Completed steps are reused only when they recorded the exact same\n" +
+			"head commit and effective config; the first invalidated step and every\n" +
+			"later step rerun.\n\n" +
+			preserveGateFixCommitsGuidance,
+		Args:          cobra.NoArgs,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return trackAxiSurface("axi-resume", "/axi/resume", telemetry.Fields{
+				"auto_yes": autoYes,
+				"has_run":  strings.TrimSpace(runID) != "",
+			}, func() error {
+				return runAxiResume(cmd, strings.TrimSpace(runID), autoYes)
+			})
+		},
+	}
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
+	cmd.Flags().StringVar(&runID, "run", "", "resume this run id instead of the newest resumable run on the current branch")
+	return cmd
+}
+
+func runAxiResume(cmd *cobra.Command, runID string, autoYes bool) error {
+	ctx := cmd.Context()
+	env, err := openAxiDaemonEnv()
+	if err != nil {
+		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+	}
+	defer env.close()
+
+	branch, err := git.CurrentBranch(ctx, ".")
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("get current branch: %v", err))
+	}
+	if branch == "HEAD" {
+		return emitError(cmd, 1, "detached HEAD: check out the branch before resuming",
+			"Run `git switch <branch>` and retry")
+	}
+	headSHA, err := git.Run(ctx, ".", "rev-parse", "HEAD")
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("get current HEAD: %v", err))
+	}
+	if guard := preflightGuard(ctx, env, branch); guard != nil {
+		return guard(cmd)
+	}
+
+	var result ipc.ResumeResult
+	if err := env.client.Call(ipc.MethodResume, &ipc.ResumeParams{RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, OldRunID: runID}, &result); err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("resume run: %v", err),
+			"Resume only reuses completed steps for the exact same HEAD and config.",
+			"Run `no-mistakes axi run --intent \"...\"` to start over intentionally.")
+	}
+	if len(result.Skipped) > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  resume: reused %s\n", strings.Join(result.Skipped, ", "))
+	}
+	final, ciReady, err := driveRun(ctx, cmd.ErrOrStderr(), env.client, result.RunID, autoYes, ciLogReader(env.p))
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
+	}
+	return renderDriveResult(cmd, final, ciReady)
 }
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent string) error {
@@ -759,9 +829,10 @@ func newAxiAbortCmd() *cobra.Command {
 			"anywhere - including outside its worktree - so an orphaned CI monitor\n" +
 			"(e.g. after a worktree was torn down) can be reaped deterministically.\n\n" +
 			"While a run is active, do NOT abort (or rerun) to go fix a finding\n" +
-			"yourself - that discards the pipeline's in-flight work and forces a full\n" +
-			"re-validation. abort and rerun are for between runs (after a failed or\n" +
-			"cancelled outcome), never to circumvent a gate.\n\n" +
+			"yourself - abort preserves committed pipeline fixes, but it still stops\n" +
+			"in-flight work and leaves the branch needing resume or re-validation.\n" +
+			"abort and rerun are for between runs (after a failed or cancelled\n" +
+			"outcome), never to circumvent a gate.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,

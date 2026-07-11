@@ -427,7 +427,7 @@ func (h *Harness) WaitForRun(branch string, timeout time.Duration) *ipc.RunInfo 
 	h.t.Helper()
 	return h.waitForRunStatus(branch, timeout, func(status types.RunStatus) bool {
 		switch status {
-		case types.RunCompleted, types.RunFailed, types.RunCancelled:
+		case types.RunCompleted, types.RunFailed, types.RunCancelled, types.RunInterrupted:
 			return true
 		default:
 			return false

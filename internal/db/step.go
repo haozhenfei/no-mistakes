@@ -9,25 +9,27 @@ import (
 
 // StepResult represents the result of a pipeline step execution.
 type StepResult struct {
-	ID             string
-	RunID          string
-	StepName       types.StepName
-	StepOrder      int
-	Status         types.StepStatus
-	ExitCode       *int
-	DurationMS     *int64
-	LogPath        *string
-	FindingsJSON   *string
-	Error          *string
-	StartedAt      *int64
-	CompletedAt    *int64
-	LastActivityAt *int64
-	LastActivity   *string
-	AgentPID       *int
-	AutoFixLimit   *int
+	ID               string
+	RunID            string
+	StepName         types.StepName
+	StepOrder        int
+	Status           types.StepStatus
+	ExitCode         *int
+	DurationMS       *int64
+	LogPath          *string
+	FindingsJSON     *string
+	Error            *string
+	StartedAt        *int64
+	CompletedAt      *int64
+	LastActivityAt   *int64
+	LastActivity     *string
+	AgentPID         *int
+	AutoFixLimit     *int
+	ValidatedHeadSHA *string
+	ConfigHash       *string
 }
 
-const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit`
+const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit, validated_head_sha, config_hash`
 
 // InsertStepResult creates a new step result record.
 func (d *DB) InsertStepResult(runID string, stepName types.StepName) (*StepResult, error) {
@@ -53,7 +55,7 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 	s := &StepResult{}
 	err := d.sql.QueryRow(
 		`SELECT `+stepResultColumns+` FROM step_results WHERE id = ?`, id,
-	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit)
+	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.ValidatedHeadSHA, &s.ConfigHash)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -75,7 +77,7 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 	var steps []*StepResult
 	for rows.Next() {
 		s := &StepResult{}
-		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit); err != nil {
+		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.ValidatedHeadSHA, &s.ConfigHash); err != nil {
 			return nil, fmt.Errorf("scan step result: %w", err)
 		}
 		steps = append(steps, s)
@@ -110,7 +112,7 @@ func (d *DB) StartStep(id string) error {
 // auto-fix limit that status surfaces use while the step is active.
 func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = ? WHERE id = ?`, types.StepStatusRunning, ts, ts, "step started", autoFixLimitDBValue(autoFixLimit), id)
+	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, error = NULL, completed_at = NULL, started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = ?, validated_head_sha = NULL, config_hash = NULL WHERE id = ?`, types.StepStatusRunning, ts, ts, "step started", autoFixLimitDBValue(autoFixLimit), id)
 	if err != nil {
 		return fmt.Errorf("start step: %w", err)
 	}
@@ -138,9 +140,24 @@ func (d *DB) CompleteStep(id string, exitCode int, durationMS int64, logPath str
 
 // CompleteStepWithStatus marks a step as finished with timing and result info.
 func (d *DB) CompleteStepWithStatus(id string, status types.StepStatus, exitCode int, durationMS int64, logPath string) error {
+	return d.CompleteStepWithValidation(id, status, exitCode, durationMS, logPath, "", "")
+}
+
+// CompleteStepWithValidation marks a step as finished and records the exact
+// branch head/config pair the result validated. Resume only trusts completed
+// rows when these values match the new run's current inputs.
+func (d *DB) CompleteStepWithValidation(id string, status types.StepStatus, exitCode int, durationMS int64, logPath, validatedHeadSHA, configHash string) error {
+	var validated any
+	if validatedHeadSHA != "" {
+		validated = validatedHeadSHA
+	}
+	var cfg any
+	if configHash != "" {
+		cfg = configHash
+	}
 	_, err := d.sql.Exec(
-		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
-		status, exitCode, durationMS, logPath, now(), now(), fmt.Sprintf("status: %s", status), id,
+		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, validated_head_sha = ?, config_hash = ? WHERE id = ?`,
+		status, exitCode, durationMS, logPath, now(), now(), fmt.Sprintf("status: %s", status), validated, cfg, id,
 	)
 	if err != nil {
 		return fmt.Errorf("complete step: %w", err)
@@ -156,6 +173,30 @@ func (d *DB) FailStep(id string, errMsg string, durationMS int64) error {
 	)
 	if err != nil {
 		return fmt.Errorf("fail step: %w", err)
+	}
+	return nil
+}
+
+// ResetStepForResume clears any incomplete/failed state so resume can rerun
+// the step in place while preserving older logs/round rows for inspection.
+func (d *DB) ResetStepForResume(id string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin reset step for resume: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM step_rounds WHERE step_result_id = ?`, id); err != nil {
+		return fmt.Errorf("delete stale step rounds for resume: %w", err)
+	}
+	_, err = tx.Exec(
+		`UPDATE step_results SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL, findings_json = NULL, error = NULL, completed_at = NULL, last_activity_at = ?, last_activity = ?, agent_pid = NULL, validated_head_sha = NULL, config_hash = NULL WHERE id = ?`,
+		types.StepStatusPending, now(), "reset for resume", id,
+	)
+	if err != nil {
+		return fmt.Errorf("reset step for resume: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit reset step for resume: %w", err)
 	}
 	return nil
 }

@@ -96,6 +96,65 @@ func TestSetClaimVerdict(t *testing.T) {
 	}
 }
 
+func TestDeleteVerifyVerdictsByRunClearsClaimVerdicts(t *testing.T) {
+	d := openTestDB(t)
+	run := newRunForClaims(t, d)
+	c, _ := d.InsertClaim(claims.Claim{RunID: run.ID, Step: "test", Text: "x", Kind: claims.KindBehavior, Evidence: []string{"ev-1"}})
+	if err := d.SetClaimVerdict(c.ID, claims.VerdictConfirmed, "verify/skeptic-majority"); err != nil {
+		t.Fatalf("set claim verdict: %v", err)
+	}
+	if _, err := d.InsertVerifyVerdict(VerifyVerdict{RunID: run.ID, ClaimID: c.ID, Verdict: claims.VerdictConfirmed}); err != nil {
+		t.Fatalf("insert verify verdict: %v", err)
+	}
+
+	if err := d.DeleteVerifyVerdictsByRun(run.ID); err != nil {
+		t.Fatalf("delete verify verdicts: %v", err)
+	}
+
+	verdicts, err := d.GetVerifyVerdictsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get verdicts: %v", err)
+	}
+	if len(verdicts) != 0 {
+		t.Fatalf("verdicts after delete = %d, want 0", len(verdicts))
+	}
+	got, _ := d.GetClaimsByRun(run.ID)
+	if len(got) != 1 {
+		t.Fatalf("claims after delete = %d, want 1", len(got))
+	}
+	if got[0].Verdict != "" || got[0].VerdictBy != "" {
+		t.Fatalf("claim verdict after delete = %q/%q, want cleared", got[0].Verdict, got[0].VerdictBy)
+	}
+}
+
+func TestDeleteClaimsByRunAlsoDeletesVerifyVerdicts(t *testing.T) {
+	d := openTestDB(t)
+	run := newRunForClaims(t, d)
+	c, _ := d.InsertClaim(claims.Claim{RunID: run.ID, Step: "test", Text: "x", Kind: claims.KindBehavior, Evidence: []string{"ev-1"}})
+	if _, err := d.InsertVerifyVerdict(VerifyVerdict{RunID: run.ID, ClaimID: c.ID, Verdict: claims.VerdictConfirmed}); err != nil {
+		t.Fatalf("insert verify verdict: %v", err)
+	}
+
+	if err := d.DeleteClaimsByRun(run.ID); err != nil {
+		t.Fatalf("delete claims: %v", err)
+	}
+
+	claims, err := d.GetClaimsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get claims: %v", err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("claims after delete = %d, want 0", len(claims))
+	}
+	verdicts, err := d.GetVerifyVerdictsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get verdicts: %v", err)
+	}
+	if len(verdicts) != 0 {
+		t.Fatalf("verdicts after delete = %d, want 0", len(verdicts))
+	}
+}
+
 func TestVerifyVerdictRecords(t *testing.T) {
 	d := openTestDB(t)
 	run := newRunForClaims(t, d)
