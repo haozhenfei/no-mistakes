@@ -103,6 +103,10 @@ This field is itself read **only from the trusted default-branch copy** of `.no-
 
 If you cannot commit to your default branch (a frozen `master`, say), set it from the machine instead: [`repos.<path>.allow_repo_commands`](/no-mistakes/reference/global-config/#repos) in `~/.no-mistakes/config.yaml` overrides this field and is equally out of a contributor's reach. That page owns the override, including why the global config is a trust-equivalent place to say this.
 
+### commands.*
+
+Every command below runs with the run's refs in its environment - `NM_BASE_REF`, `NM_BASE_SHA`, `NM_HEAD_REF`, `NM_HEAD_SHA`, `NM_DEFAULT_BRANCH`, `NM_RUN_ID` - so it can scope itself to the change instead of hardcoding a branch name. [Environment Variables](/no-mistakes/reference/environment/#variables-exported-to-repo-commands) owns the list and the semantics.
+
 ### commands.test
 
 Explicit test command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
@@ -276,7 +280,7 @@ The contract between no-mistakes and your script:
 | | |
 |---|---|
 | Invocation | Once per evidence file, from the worktree, via `sh -c` (POSIX) or `cmd.exe /c` (Windows). The absolute evidence file path is appended as the command's **last argument**, so a bare hook reads it as `$1` and a hook with its own flags (`upload.sh --bucket evidence`) gets it after them. |
-| Environment | `NM_EVIDENCE_FILE` (the same absolute path), `NM_EVIDENCE_LABEL`, `NM_EVIDENCE_RUN_ID`, `NM_EVIDENCE_BRANCH`. |
+| Environment | `NM_EVIDENCE_FILE` (the same absolute path), `NM_EVIDENCE_LABEL`, `NM_EVIDENCE_RUN_ID`, `NM_EVIDENCE_BRANCH`, plus the run's [ref variables](/no-mistakes/reference/environment/#variables-exported-to-repo-commands). |
 | Success | Exit code `0` **and** an absolute `http`/`https` URL as the **last non-empty line of stdout**. Only stdout is read, so your script can log progress freely to stderr. |
 | Failure | Any of: non-zero exit, timeout, empty stdout, or stdout that is not a well-formed absolute `http(s)` URL. |
 | On failure | The run **continues**. The artifact keeps its local path (exactly the no-hook behavior), the failure is logged, and a warning line is appended to the PR's testing summary. A storage outage never fails a change whose tests passed - the upload is a publication channel, not a gate. |

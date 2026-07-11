@@ -185,6 +185,30 @@ Disable telemetry collection.
 
 When set to a disabling value, telemetry stays off even if a runtime or embedded website ID is available.
 
+## Variables exported to repo commands
+
+no-mistakes exports the run's refs to every command it runs from `.no-mistakes.yaml` — `commands.test`, `commands.lint`, `commands.format`, and `test.evidence.upload_cmd`. They let a command scope itself to the change (a monorepo can build or test only the impacted packages) without hardcoding a branch name that expires.
+
+| Variable             | Value                                                                                                                                              |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NM_BASE_REF`        | The ref the branch is gated against: the remote-tracking ref of the repo's default branch, e.g. `origin/main`. This is the ref the rebase step rebases onto, so it resolves inside the run's worktree. |
+| `NM_BASE_SHA`        | The commit the branch forked from: the merge-base of the run's HEAD and `NM_BASE_REF`.                                                              |
+| `NM_HEAD_REF`        | The pushed branch name, e.g. `feature/login`. The run's worktree is on a detached HEAD, so this names the branch under review rather than a local ref that resolves there. |
+| `NM_HEAD_SHA`        | The commit the command is running against (the worktree HEAD, after the rebase step).                                                               |
+| `NM_DEFAULT_BRANCH`  | The repo's default branch name without a remote prefix, e.g. `main` or `release/20260713`. Follows the `default_branch` override when one is set.   |
+| `NM_RUN_ID`          | The pipeline run's ID (the same ID `no-mistakes runs` prints).                                                                                      |
+
+A variable no-mistakes cannot resolve is left unset rather than guessed, so a command can fall back with `${NM_BASE_REF:-origin/main}`.
+
+Example — test only the packages the branch touched, in a Rush monorepo:
+
+```yaml
+commands:
+  test: 'rush test --impacted-by-except "$NM_BASE_REF"'
+```
+
+`test.evidence.upload_cmd` additionally receives `NM_EVIDENCE_FILE`, `NM_EVIDENCE_LABEL`, `NM_EVIDENCE_RUN_ID`, and `NM_EVIDENCE_BRANCH`.
+
 ## Environment the daemon sees
 
 When the daemon runs through a managed service (launchd, systemd user service, Task Scheduler), the macOS and Linux service definitions include a default `PATH` with common user and system binary directories. They also bake in any proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`) that were set when you installed or refreshed the service, so the daemon and the agents it spawns can reach the network through your proxy even when the login-shell probe is unavailable. Once baked in, the values are preserved across later service refreshes and restarts even when the proxy variables are not exported in that shell, so a routine `daemon restart` or a binary upgrade will not strip them; export the variables again only when you need to change or remove them. Both the upper- and lower-case spellings are forwarded exactly as you set them, because tooling is inconsistent about which it reads (curl, for example, honors only the lower-case `http_proxy` for plain-HTTP requests). Because a proxy URL can embed credentials (for example `http://user:pass@host`), the generated service file is restricted to owner-only `0600` permissions whenever proxy values are forwarded into it. When no proxy variables are set, the generated definition is unchanged and keeps the conventional `0644` mode. Windows Task Scheduler inherits your logon environment and needs no forwarding. At daemon startup, the daemon resolves environment from your login shell on macOS and Linux, preserves your shell `PATH` order, and appends any missing well-known directories such as `~/.local/bin`, `~/go/bin`, `~/.cargo/bin`, `~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, and `/bin`. If login-shell resolution fails or returns no entries, the daemon logs a warning and uses an augmented process-environment fallback that may omit version-manager directories such as nvm, fnm, or volta. On Windows it reuses the current process environment.
