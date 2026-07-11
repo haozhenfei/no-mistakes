@@ -215,7 +215,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		var err error
 		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent)
 		if err != nil {
-			return emitError(cmd, 1, err.Error())
+			return emitError(cmd, 1, err.Error(), gatePushHelp(err)...)
 		}
 	}
 
@@ -307,7 +307,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 		return run.ID, nil
 	}
 	if !shouldRerunAfterNoActiveRun(pushErr) {
-		return "", fmt.Errorf("push %q to gate: %v", branch, pushErr)
+		return "", fmt.Errorf("push %q to gate: %w", branch, gate.ExplainPushError(pushErr))
 	}
 
 	// No run appeared: the push was likely up-to-date. Rerun the latest gate
@@ -391,6 +391,15 @@ func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID,
 
 func shouldRerunAfterNoActiveRun(pushErr error) bool {
 	return pushErr == nil
+}
+
+// gatePushHelp returns the recovery steps for a failed gate push, so the agent
+// gets the fix instead of git's raw refusal.
+func gatePushHelp(err error) []string {
+	if gate.ShallowPushRejected(err) {
+		return gate.ShallowPushHelp()
+	}
+	return nil
 }
 
 func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {

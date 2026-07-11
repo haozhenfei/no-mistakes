@@ -71,6 +71,12 @@ Safest local verification sequence after non-trivial changes:
 - Agent harnesses and hardened CI inject `safe.bareRepository=explicit`, which forbids cwd-based discovery of bare repositories. Route every gate git call through `git.Run`, which detects a bare git dir and prepends `--git-dir=<dir>`; never shell out to git in a bare gate repo relying on `cmd.Dir` or `-C` discovery (issue #362).
 - Regressions: `TestRunOnBareRepoUnderSafeBareRepositoryExplicit`, `TestWorktreeAddRemoveOnBareRepoUnderSafeBareRepositoryExplicit`, `TestInitUnderSafeBareRepositoryExplicit`.
 
+**Shallow Clones (`receive.shallowUpdate` on the gate)**
+
+- Large monorepos are cloned with `--depth`, and a push from such a clone carries no ancestors below the shallow boundary, so an empty gate cannot complete the commit graph and git refuses it ("shallow update not allowed") - the repo is simply ungateable. `provisionGate` therefore sets `receive.shallowUpdate=true`; the gate then records the same shallow boundary. Measured, not assumed: a worktree cut from a shallow gate fetches upstream, resolves a merge base, rebases, and its push is accepted by the full-history upstream.
+- A gate created before this shipped still rejects; `gate.ExplainPushError` turns git's raw refusal into the cause plus the fix (re-run `no-mistakes init`, or `git fetch --unshallow`), and both gate-push call sites (`internal/cli/axi_drive.go`, `wizard.go`) route through it.
+- Regressions: `TestPlainBareRepoRejectsShallowPush`, `TestInitGateAcceptsShallowClonePush`, `TestExplainPushError_OnRealGitRejection` (`internal/gate`), e2e `TestShallowClonedRepoGates` (`SetupOpts.ShallowClone`).
+
 **Post-Receive Hook Gate Path Resolution (`internal/git/hook.go`)**
 
 - The hook's `--gate` value must never come from a bare `$(pwd)`: Git can invoke `post-receive` from a cwd that collapses to `.` (issue #269), which the daemon rejects and the pipeline silently never starts. The hook script resolves an absolute gate dir (git first, hook location fallback), and `normalizeNotifyGatePath` in `internal/cli/daemon_cmd.go` is an independent second layer that absolutizes whatever an already-installed older hook sends.

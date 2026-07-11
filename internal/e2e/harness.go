@@ -42,6 +42,7 @@ type Harness struct {
 
 	agentName         string // claude / codex / opencode
 	allowRepoCommands *bool  // mirrors SetupOpts.AllowRepoCommands
+	shallowClone      bool   // mirrors SetupOpts.ShallowClone
 }
 
 // SetupOpts controls per-test setup.
@@ -65,6 +66,12 @@ type SetupOpts struct {
 	// (commands must come from the trusted default branch) pass a pointer
 	// to false to exercise the secure default.
 	AllowRepoCommands *bool
+
+	// ShallowClone builds the working repo as a `git clone --depth=1` of the
+	// upstream instead of a local `git init`, which is how large monorepos are
+	// checked out. Its history is truncated, so pushes from it carry no
+	// ancestors below the shallow boundary - see TestShallowClonedRepoGates.
+	ShallowClone bool
 }
 
 const e2eDaemonStartTimeout = "45s"
@@ -99,6 +106,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		Scenario:          opts.Scenario,
 		agentName:         opts.Agent,
 		allowRepoCommands: opts.AllowRepoCommands,
+		shallowClone:      opts.ShallowClone,
 	}
 
 	for _, dir := range []string{h.BinDir, h.NMHome, h.HomeDir, h.WorkDir} {
@@ -252,14 +260,25 @@ func (h *Harness) initGitRepos() {
 	}
 	mustGit(h.UpstreamDir, "init", "--bare", "--initial-branch=main")
 
-	mustGit(h.WorkDir, "init", "--initial-branch=main")
-	mustGit(h.WorkDir, "config", "user.email", "e2e@example.com")
-	mustGit(h.WorkDir, "config", "user.name", "E2E Test")
-	mustGit(h.WorkDir, "config", "commit.gpgsign", "false")
+	// A shallow working repo cannot be produced by `git init`: it has to be a
+	// truncated clone. Seed the upstream from a throwaway checkout, then clone
+	// it back into WorkDir with --depth=1 below.
+	srcDir := h.WorkDir
+	if h.shallowClone {
+		srcDir = filepath.Join(filepath.Dir(h.WorkDir), "seed")
+		if err := os.MkdirAll(srcDir, 0o755); err != nil {
+			h.t.Fatalf("mkdir seed: %v", err)
+		}
+	}
+
+	mustGit(srcDir, "init", "--initial-branch=main")
+	mustGit(srcDir, "config", "user.email", "e2e@example.com")
+	mustGit(srcDir, "config", "user.name", "E2E Test")
+	mustGit(srcDir, "config", "commit.gpgsign", "false")
 
 	// One initial commit so the branch exists and the gate can rebase
 	// against a real base.
-	readme := filepath.Join(h.WorkDir, "README.md")
+	readme := filepath.Join(srcDir, "README.md")
 	if err := os.WriteFile(readme, []byte("# e2e\n"), 0o644); err != nil {
 		h.t.Fatalf("write readme: %v", err)
 	}
@@ -272,15 +291,38 @@ func (h *Harness) initGitRepos() {
 	if h.allowRepoCommands != nil {
 		allowRepoCommands = *h.allowRepoCommands
 	}
-	repoConfig := filepath.Join(h.WorkDir, ".no-mistakes.yaml")
+	repoConfig := filepath.Join(srcDir, ".no-mistakes.yaml")
 	repoCfg := fmt.Sprintf("ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\nallow_repo_commands: %t\n", allowRepoCommands)
 	if err := os.WriteFile(repoConfig, []byte(repoCfg), 0o644); err != nil {
 		h.t.Fatalf("write repo config: %v", err)
 	}
-	mustGit(h.WorkDir, "add", "README.md", ".no-mistakes.yaml")
-	mustGit(h.WorkDir, "commit", "-m", "initial commit")
-	mustGit(h.WorkDir, "remote", "add", "origin", h.UpstreamDir)
-	mustGit(h.WorkDir, "push", "-u", "origin", "main")
+	mustGit(srcDir, "add", "README.md", ".no-mistakes.yaml")
+	mustGit(srcDir, "commit", "-m", "initial commit")
+	mustGit(srcDir, "remote", "add", "origin", h.UpstreamDir)
+	mustGit(srcDir, "push", "-u", "origin", "main")
+
+	if !h.shallowClone {
+		return
+	}
+
+	// Give main enough history for --depth=1 to actually truncate something,
+	// then clone it back. --depth is ignored for local-path clones, so the
+	// clone must go through a file:// URL; the origin URL stays provider-less,
+	// which is what keeps the PR and CI steps skipping as everywhere else.
+	mustGit(srcDir, "commit", "--allow-empty", "-m", "upstream history 2")
+	mustGit(srcDir, "commit", "--allow-empty", "-m", "upstream history 3")
+	mustGit(srcDir, "push", "origin", "main")
+
+	upstreamURL := "file://" + filepath.ToSlash(h.UpstreamDir)
+	mustGit("", "clone", "--depth=1", upstreamURL, h.WorkDir)
+	mustGit(h.WorkDir, "config", "user.email", "e2e@example.com")
+	mustGit(h.WorkDir, "config", "user.name", "E2E Test")
+	mustGit(h.WorkDir, "config", "commit.gpgsign", "false")
+
+	out, err := h.runGit(ctx, h.WorkDir, "rev-parse", "--is-shallow-repository")
+	if err != nil || strings.TrimSpace(string(out)) != "true" {
+		h.t.Fatalf("working repo is not shallow: %v\n%s", err, out)
+	}
 }
 
 // Run invokes the no-mistakes binary in the working repo and returns
