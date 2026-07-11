@@ -95,8 +95,8 @@ func TestRecoverStaleRunsClearsAwaitingAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get run: %v", err)
 	}
-	if got.Status != types.RunFailed {
-		t.Errorf("status = %q, want failed", got.Status)
+	if got.Status != types.RunInterrupted {
+		t.Errorf("status = %q, want interrupted", got.Status)
 	}
 	if got.AwaitingAgentSince != nil {
 		t.Errorf("AwaitingAgentSince = %d after recovery, want nil", *got.AwaitingAgentSince)
@@ -368,7 +368,7 @@ func TestCascadeDeleteRepo(t *testing.T) {
 	}
 }
 
-func TestRecoverStaleRunsMarksRunsFailed(t *testing.T) {
+func TestRecoverStaleRunsMarksRunsInterrupted(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 
@@ -387,18 +387,19 @@ func TestRecoverStaleRunsMarksRunsFailed(t *testing.T) {
 		t.Errorf("recovered count = %d, want 2", count)
 	}
 
-	// Pending and running should be failed.
+	// Pending and running should be interrupted so explicit resume can reuse
+	// completed step work from the same head.
 	got, _ := d.GetRun(pendingRun.ID)
-	if got.Status != types.RunFailed {
-		t.Errorf("pending run status = %q, want %q", got.Status, types.RunFailed)
+	if got.Status != types.RunInterrupted {
+		t.Errorf("pending run status = %q, want %q", got.Status, types.RunInterrupted)
 	}
 	if got.Error == nil || *got.Error != "daemon crashed" {
 		t.Errorf("pending run error = %v, want %q", got.Error, "daemon crashed")
 	}
 
 	got, _ = d.GetRun(runningRun.ID)
-	if got.Status != types.RunFailed {
-		t.Errorf("running run status = %q, want %q", got.Status, types.RunFailed)
+	if got.Status != types.RunInterrupted {
+		t.Errorf("running run status = %q, want %q", got.Status, types.RunInterrupted)
 	}
 
 	// Completed should be untouched.
@@ -437,8 +438,8 @@ func TestRecoverStaleRunsExceptPreservesOnlyValidatedRuns(t *testing.T) {
 	}
 	gotPreserved, _ := d.GetRun(preserved.ID)
 	gotStale, _ := d.GetRun(stale.ID)
-	if gotPreserved.Status != types.RunRunning || gotStale.Status != types.RunFailed {
-		t.Fatalf("run statuses = preserved %s stale %s, want running and failed", gotPreserved.Status, gotStale.Status)
+	if gotPreserved.Status != types.RunRunning || gotStale.Status != types.RunInterrupted {
+		t.Fatalf("run statuses = preserved %s stale %s, want running and interrupted", gotPreserved.Status, gotStale.Status)
 	}
 	gotPreservedStep, _ := d.GetStepResult(preservedStep.ID)
 	gotStaleStep, _ := d.GetStepResult(staleStep.ID)

@@ -15,6 +15,7 @@ const (
 	MethodGetRunsForHead = "get_runs_for_head"
 	MethodGetActiveRun   = "get_active_run"
 	MethodRerun          = "rerun"
+	MethodResume         = "resume"
 	MethodSubscribe      = "subscribe"
 	MethodRespond        = "respond"
 	MethodCancelRun      = "cancel_run"
@@ -108,6 +109,16 @@ type RerunParams struct {
 	Intent    string           `json:"intent,omitempty"`
 }
 
+// ResumeParams resumes a previous run for the same branch head. OldRunID is
+// optional; when empty, the daemon picks the newest resumable run for the
+// branch and current head.
+type ResumeParams struct {
+	RepoID   string `json:"repo_id"`
+	Branch   string `json:"branch"`
+	HeadSHA  string `json:"head_sha"`
+	OldRunID string `json:"old_run_id,omitempty"`
+}
+
 // SubscribeParams starts an event stream for a run.
 type SubscribeParams struct {
 	RunID string `json:"run_id"`
@@ -165,6 +176,13 @@ type GetActiveRunResult struct {
 // RerunResult confirms a rerun was created.
 type RerunResult struct {
 	RunID string `json:"run_id"`
+}
+
+// ResumeResult confirms a resume run was created.
+type ResumeResult struct {
+	RunID     string   `json:"run_id"`
+	FromRunID string   `json:"from_run_id"`
+	Skipped   []string `json:"skipped,omitempty"`
 }
 
 // RespondResult confirms the action was accepted.
@@ -230,6 +248,8 @@ type StepResultInfo struct {
 	FixRoundCount    int      `json:"fix_round_count,omitempty"`
 	AutoFixLimit     int      `json:"auto_fix_limit,omitempty"`
 	PendingFixSource string   `json:"pending_fix_source,omitempty"`
+	ValidatedHeadSHA *string  `json:"validated_head_sha,omitempty"`
+	ConfigHash       *string  `json:"config_hash,omitempty"`
 	Error            *string  `json:"error,omitempty"`
 	StartedAt        *int64   `json:"started_at,omitempty"`
 	CompletedAt      *int64   `json:"completed_at,omitempty"`

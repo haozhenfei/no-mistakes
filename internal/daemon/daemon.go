@@ -273,7 +273,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	for _, plan := range plans {
 		preserved[plan.run.ID] = struct{}{}
 	}
-	count, err := d.RecoverStaleRunsExcept("daemon crashed during execution", preserved)
+	count, err := d.RecoverStaleRunsExcept(types.RunInterruptReasonDaemonCrashed, preserved)
 	if err != nil {
 		slog.Error("failed to recover stale runs", "error", err)
 		for _, plan := range plans {
@@ -492,6 +492,18 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.RerunResult{RunID: runID}, nil
 	})
 
+	srv.Handle(ipc.MethodResume, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var p ipc.ResumeParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		result, err := mgr.HandleResume(ctx, p.RepoID, p.Branch, p.HeadSHA, p.OldRunID)
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	})
+
 	srv.Handle(ipc.MethodPushReceived, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p ipc.PushReceivedParams
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -578,20 +590,22 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 
 func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 	info := ipc.StepResultInfo{
-		ID:             s.ID,
-		RunID:          s.RunID,
-		StepName:       s.StepName,
-		StepOrder:      s.StepOrder,
-		Status:         s.Status,
-		ExitCode:       s.ExitCode,
-		DurationMS:     s.DurationMS,
-		FindingsJSON:   s.FindingsJSON,
-		Error:          s.Error,
-		StartedAt:      s.StartedAt,
-		CompletedAt:    s.CompletedAt,
-		LastActivityAt: s.LastActivityAt,
-		LastActivity:   s.LastActivity,
-		AgentPID:       s.AgentPID,
+		ID:               s.ID,
+		RunID:            s.RunID,
+		StepName:         s.StepName,
+		StepOrder:        s.StepOrder,
+		Status:           s.Status,
+		ExitCode:         s.ExitCode,
+		DurationMS:       s.DurationMS,
+		FindingsJSON:     s.FindingsJSON,
+		Error:            s.Error,
+		StartedAt:        s.StartedAt,
+		CompletedAt:      s.CompletedAt,
+		LastActivityAt:   s.LastActivityAt,
+		LastActivity:     s.LastActivity,
+		AgentPID:         s.AgentPID,
+		ValidatedHeadSHA: s.ValidatedHeadSHA,
+		ConfigHash:       s.ConfigHash,
 	}
 	if s.AutoFixLimit != nil {
 		info.AutoFixLimit = *s.AutoFixLimit

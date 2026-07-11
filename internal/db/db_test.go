@@ -41,7 +41,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
-	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid"} {
+	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "validated_head_sha", "config_hash"} {
 		if !hasColumn(t, d, "step_results", column) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
@@ -206,7 +206,7 @@ func TestOpenMigratesStepActivityColumns(t *testing.T) {
 	}
 	t.Cleanup(func() { d.Close() })
 
-	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid"} {
+	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "validated_head_sha", "config_hash"} {
 		if !hasColumn(t, d, "step_results", column) {
 			t.Fatalf("expected migrated column %q", column)
 		}

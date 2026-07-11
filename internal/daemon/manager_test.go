@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -360,6 +361,234 @@ func TestRerunSkipStepsConfiguresExecutor(t *testing.T) {
 			t.Fatalf("review status = %s, want %s", step.Status, types.StepStatusSkipped)
 		}
 	}
+}
+
+func TestResumeSkipsCompletedStepsForSameHead(t *testing.T) {
+	review := &mockPassStep{name: types.StepReview}
+	testStep := &mockPassStep{name: types.StepTest}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{review, testStep}
+	})
+
+	_, headSHA := setupTestGitRepo(t, p, d, "resume-skip-repo")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate: p.RepoDir("resume-skip-repo"),
+		Ref:  "refs/heads/main",
+		Old:  "0000000000000000000000000000000000000000",
+		New:  headSHA,
+	}, &first); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, first.RunID)
+	if got := review.execCnt.Load(); got != 1 {
+		t.Fatalf("review executions after first run = %d, want 1", got)
+	}
+	if got := testStep.execCnt.Load(); got != 1 {
+		t.Fatalf("test executions after first run = %d, want 1", got)
+	}
+	if err := d.UpdateRunErrorStatus(first.RunID, types.RunInterruptReasonDaemonCrashed, types.RunInterrupted); err != nil {
+		t.Fatal(err)
+	}
+
+	var resumed ipc.ResumeResult
+	if err := client.Call(ipc.MethodResume, &ipc.ResumeParams{
+		RepoID:  "resume-skip-repo",
+		Branch:  "main",
+		HeadSHA: headSHA,
+	}, &resumed); err != nil {
+		t.Fatal(err)
+	}
+	if resumed.RunID != first.RunID {
+		t.Fatalf("resume run id = %s, want original %s", resumed.RunID, first.RunID)
+	}
+	waitForRunTerminalState(t, d, resumed.RunID)
+	if got := review.execCnt.Load(); got != 1 {
+		t.Fatalf("review executions after resume = %d, want still 1", got)
+	}
+	if got := testStep.execCnt.Load(); got != 1 {
+		t.Fatalf("test executions after resume = %d, want still 1", got)
+	}
+	if strings.Join(resumed.Skipped, ",") != "review,test" {
+		t.Fatalf("resume skipped = %v, want review,test", resumed.Skipped)
+	}
+}
+
+func TestResumeDoesNotSkipWhenHeadMoved(t *testing.T) {
+	review := &mockPassStep{name: types.StepReview}
+	testStep := &mockPassStep{name: types.StepTest}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{review, testStep}
+	})
+
+	repo, headSHA := setupTestGitRepo(t, p, d, "resume-moved-head-repo")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate: p.RepoDir("resume-moved-head-repo"),
+		Ref:  "refs/heads/main",
+		Old:  "0000000000000000000000000000000000000000",
+		New:  headSHA,
+	}, &first); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, first.RunID)
+	if err := d.UpdateRunErrorStatus(first.RunID, types.RunInterruptReasonDaemonCrashed, types.RunInterrupted); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "moved.txt"), []byte("moved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "move branch head")
+	movedHead := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	gitCmd(t, repo.WorkingPath, "push", p.RepoDir("resume-moved-head-repo"), "HEAD:refs/heads/main")
+
+	var resumedByID ipc.ResumeResult
+	if err := client.Call(ipc.MethodResume, &ipc.ResumeParams{
+		RepoID:   "resume-moved-head-repo",
+		Branch:   "main",
+		HeadSHA:  movedHead,
+		OldRunID: first.RunID,
+	}, &resumedByID); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, resumedByID.RunID)
+	if got := review.execCnt.Load(); got != 2 {
+		t.Fatalf("review executions after moved-head resume = %d, want 2", got)
+	}
+	if got := testStep.execCnt.Load(); got != 2 {
+		t.Fatalf("test executions after moved-head resume = %d, want 2", got)
+	}
+	if len(resumedByID.Skipped) != 0 {
+		t.Fatalf("moved-head resume skipped = %v, want none", resumedByID.Skipped)
+	}
+}
+
+type commitThenBlockStep struct {
+	name      types.StepName
+	started   chan struct{}
+	committed chan string
+}
+
+func (s *commitThenBlockStep) Name() types.StepName { return s.name }
+
+func (s *commitThenBlockStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := os.WriteFile(filepath.Join(sctx.WorkDir, "pipeline-fix.txt"), []byte("approved fix\n"), 0o644); err != nil {
+		return nil, err
+	}
+	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "add", "."); err != nil {
+		return nil, err
+	}
+	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "commit", "-m", "pipeline approved fix"); err != nil {
+		return nil, err
+	}
+	headSHA, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	ref := "refs/heads/" + sctx.Run.Branch
+	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "update-ref", ref, headSHA); err != nil {
+		return nil, err
+	}
+	sctx.Run.HeadSHA = headSHA
+	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
+		return nil, err
+	}
+	select {
+	case s.committed <- headSHA:
+	default:
+	}
+	if s.started != nil {
+		close(s.started)
+	}
+	<-sctx.Ctx.Done()
+	return nil, sctx.Ctx.Err()
+}
+
+func TestAbortPreservesPipelineFixCommits(t *testing.T) {
+	started := make(chan struct{})
+	committed := make(chan string, 1)
+	step := &commitThenBlockStep{name: types.StepReview, started: started, committed: committed}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{step}
+	})
+
+	_, originalHead := setupTestGitRepo(t, p, d, "abort-preserve-repo")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var pushResult ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate: p.RepoDir("abort-preserve-repo"),
+		Ref:  "refs/heads/main",
+		Old:  "0000000000000000000000000000000000000000",
+		New:  originalHead,
+	}, &pushResult); err != nil {
+		t.Fatal(err)
+	}
+	var fixHead string
+	select {
+	case fixHead = <-committed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pipeline fix commit was not created")
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pipeline step did not block after committing")
+	}
+
+	var cancelResult ipc.CancelRunResult
+	if err := client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: pushResult.RunID}, &cancelResult); err != nil {
+		t.Fatal(err)
+	}
+	cancelled := waitForRunIDStatus(t, d, pushResult.RunID, types.RunCancelled)
+	if cancelled.HeadSHA != fixHead {
+		t.Fatalf("run head after abort = %s, want fix head %s", cancelled.HeadSHA, fixHead)
+	}
+
+	branchLog := gitOutput(t, p.RepoDir("abort-preserve-repo"), "log", "--oneline", "refs/heads/main", "-3")
+	if !strings.Contains(branchLog, "pipeline approved fix") {
+		t.Fatalf("branch log after abort does not contain fix commit %s:\n%s", fixHead, branchLog)
+	}
+	branchHead := gitOutput(t, p.RepoDir("abort-preserve-repo"), "rev-parse", "refs/heads/main")
+	if branchHead != fixHead {
+		t.Fatalf("branch head after abort = %s, want fix commit %s; log:\n%s", branchHead, fixHead, branchLog)
+	}
+}
+
+func waitForRunIDStatus(t *testing.T, d *db.DB, runID string, status types.RunStatus) *db.Run {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := d.GetRun(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run != nil && run.Status == status {
+			return run
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	run, _ := d.GetRun(runID)
+	t.Fatalf("run %s did not reach %s; got %+v", runID, status, run)
+	return nil
 }
 
 func TestPushReceivedReturnsBeforeIntentSummarization(t *testing.T) {

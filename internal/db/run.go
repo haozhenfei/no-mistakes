@@ -128,6 +128,27 @@ func (d *DB) GetRunsByRepoHead(repoID, branch, headSHA string) ([]*Run, error) {
 	return runs, rows.Err()
 }
 
+// GetRunsByRepoBranch returns the runs for a repo branch, newest first.
+func (d *DB) GetRunsByRepoBranch(repoID, branch string) ([]*Run, error) {
+	rows, err := d.sql.Query(
+		`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND branch = ? ORDER BY created_at DESC, id DESC`,
+		repoID, branch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get runs by repo branch: %w", err)
+	}
+	defer rows.Close()
+	var runs []*Run
+	for rows.Next() {
+		r := &Run{}
+		if err := scanRun(rows, r); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
 // GetActiveRun returns the currently active run (pending or running) for a repo,
 // if any. When branch is non-empty, only a run on that exact branch is returned
 // - the setup wizard relies on this to decide whether a new run is needed for
@@ -199,6 +220,20 @@ func (d *DB) UpdateRunHeadSHA(id, headSHA string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run head sha: %w", err)
+	}
+	return nil
+}
+
+// StartRunResume marks a previously terminal run active again for an explicit
+// resume attempt, clearing stale terminal error/parked state and setting the
+// head the resumed worktree will validate.
+func (d *DB) StartRunResume(id, headSHA string) error {
+	_, err := d.sql.Exec(
+		`UPDATE runs SET status = ?, head_sha = ?, error = NULL, awaiting_agent_since = NULL, updated_at = ? WHERE id = ?`,
+		types.RunRunning, headSHA, now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("start run resume: %w", err)
 	}
 	return nil
 }
@@ -289,14 +324,14 @@ func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
 	return nil
 }
 
-// RecoverStaleRuns marks any runs stuck in pending/running status as failed
+// RecoverStaleRuns marks any runs stuck in pending/running status as interrupted
 // and fails any in-progress steps. This is called at daemon startup to clean
 // up after a previous crash. Returns the number of recovered runs.
 func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
 	return d.RecoverStaleRunsExcept(errMsg, nil)
 }
 
-// RecoverStaleRunsExcept marks active runs as failed unless their IDs appear
+// RecoverStaleRunsExcept marks active runs as interrupted unless their IDs appear
 // in preserved. Callers use preserved only after independently proving a run
 // can be reconstructed safely.
 func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}) (int, error) {
@@ -326,11 +361,11 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 		return 0, fmt.Errorf("recover stale steps: %w", err)
 	}
 
-	// Fail stale runs. Clear any awaiting-agent marker so a recovered (now
-	// failed) run is never reported as still parked awaiting the agent,
+	// Interrupt stale runs. Clear any awaiting-agent marker so a recovered run
+	// is never reported as still parked awaiting the agent,
 	// accumulating the marker's elapsed time into the run's parked total so
 	// the parked evidence survives the crash.
-	runArgs := []any{types.RunFailed, errMsg, ts, ts, ts, types.RunPending, types.RunRunning}
+	runArgs := []any{types.RunInterrupted, errMsg, ts, ts, ts, types.RunPending, types.RunRunning}
 	runArgs = append(runArgs, args...)
 	result, err := tx.Exec(
 		`UPDATE runs SET status = ?, error = ?,

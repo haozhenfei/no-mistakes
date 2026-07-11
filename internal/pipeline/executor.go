@@ -184,6 +184,132 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	return nil
 }
 
+// ResumeFrom continues a previous terminal run in place. It reuses only the
+// leading completed steps that were validated for this exact run head and
+// effective config. The first non-reusable row and every later row are reset
+// and executed again, so a rerun of any prior step invalidates all later step
+// results.
+func (e *Executor) ResumeFrom(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
+	if repo == nil {
+		return fmt.Errorf("resume run has no repository")
+	}
+	if run == nil {
+		return fmt.Errorf("resume run is nil")
+	}
+	if !ResumableStatus(run.Status) && run.Status != types.RunRunning {
+		return fmt.Errorf("run %s is %s, not resumable", run.ID, run.Status)
+	}
+	if err := e.db.StartRunResume(run.ID, run.HeadSHA); err != nil {
+		return fmt.Errorf("start resume: %w", err)
+	}
+	run.Status = types.RunRunning
+	run.Error = nil
+	run.AwaitingAgentSince = nil
+	e.emitRunEvent(ipc.EventRunUpdated, run, repo)
+
+	logDir := e.paths.RunLogDir(run.ID)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
+	}
+
+	e.initializeRunScopes(run.ID)
+
+	results, err := e.db.GetStepsByRun(run.ID)
+	if err != nil {
+		return e.failRun(run, repo, fmt.Errorf("get resume steps: %w", err), ctx)
+	}
+	if len(results) == 0 {
+		results = make([]*db.StepResult, 0, len(e.steps))
+		for _, step := range e.steps {
+			sr, err := e.db.InsertStepResult(run.ID, step.Name())
+			if err != nil {
+				return e.failRun(run, repo, fmt.Errorf("insert resume step result: %w", err), ctx)
+			}
+			results = append(results, sr)
+		}
+	}
+	if len(results) != len(e.steps) {
+		return e.failRun(run, repo, fmt.Errorf("resume run has %d step records for %d steps", len(results), len(e.steps)), ctx)
+	}
+
+	configHash := ConfigHash(e.config)
+	start := len(e.steps)
+	for i, result := range results {
+		if result.StepName != e.steps[i].Name() {
+			return e.failRun(run, repo, fmt.Errorf("resume step %d is %q, want %q", i, result.StepName, e.steps[i].Name()), ctx)
+		}
+		if CompletedStepReusable(result, run.HeadSHA, configHash) {
+			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, result.StepName, string(result.Status), "", "", "", result.DurationMS)
+			continue
+		}
+		start = i
+		break
+	}
+
+	for i := start; i < len(results); i++ {
+		if i == start {
+			if err := e.resetRunScopedStateForResume(run.ID, results[i].StepName); err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+		}
+		if err := e.db.ResetStepForResume(results[i].ID); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("reset resume step %s: %w", results[i].StepName, err), ctx)
+		}
+		results[i].Status = types.StepStatusPending
+	}
+
+	for index := start; index < len(e.steps); index++ {
+		if ctx.Err() != nil {
+			return e.failRun(run, repo, context.Cause(ctx), ctx)
+		}
+		skipRemaining, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, stepExecutionState{})
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		if skipRemaining {
+			for _, remaining := range results[index+1:] {
+				if dbErr := e.db.CompleteStepWithStatus(remaining.ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
+					slog.Warn("failed to finalize skipped step", "step", remaining.StepName, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, remaining.StepName, string(types.StepStatusSkipped), "", "", "", nil)
+			}
+			break
+		}
+	}
+
+	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		return fmt.Errorf("complete resumed run: %w", err)
+	}
+	run.Status = types.RunCompleted
+	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	return nil
+}
+
+func (e *Executor) resetRunScopedStateForResume(runID string, firstRerunStep types.StepName) error {
+	firstOrder := firstRerunStep.Order()
+	if firstOrder == 0 {
+		return nil
+	}
+	if firstOrder <= types.StepQA.Order() {
+		if err := e.db.DeleteClaimsByRun(runID); err != nil {
+			return fmt.Errorf("reset resume claims: %w", err)
+		}
+		if err := e.db.DeleteCoverageEntriesByRun(runID); err != nil {
+			return fmt.Errorf("reset resume coverage ledger: %w", err)
+		}
+		return nil
+	}
+	if firstOrder <= types.StepVerify.Order() {
+		if err := e.db.DeleteVerifyVerdictsByRun(runID); err != nil {
+			return fmt.Errorf("reset resume verify verdicts: %w", err)
+		}
+		if err := e.db.DeleteCoverageEntriesByRun(runID); err != nil {
+			return fmt.Errorf("reset resume coverage ledger: %w", err)
+		}
+	}
+	return nil
+}
+
 func (e *Executor) initializeRunScopes(runID string) {
 	sessionsEnabled := e.config != nil && e.config.SessionReuse && e.agent != nil
 	e.sessions = NewRunSessions(e.db, runID, e.agent, sessionsEnabled)
@@ -282,7 +408,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
 	case types.ActionApprove:
-		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusCompleted, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
+		if err := e.db.CompleteStepWithValidation(gate.stepResult.ID, types.StepStatusCompleted, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult), run.HeadSHA, ConfigHash(e.config)); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err), ctx)
 		}
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", "", &duration)
@@ -785,7 +911,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 		case types.ActionSkip:
 			// Skip - mark step skipped and return (not an error)
-			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {
+			if err := e.db.CompleteStepWithValidation(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath, run.HeadSHA, ConfigHash(e.config)); err != nil {
 				return false, fmt.Errorf("complete step %s (skip): %w", stepName, err)
 			}
 			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusSkipped), "", "", "", &executionMS)
@@ -842,7 +968,7 @@ done:
 	if stepSkipped {
 		status = types.StepStatusSkipped
 	}
-	if err := e.db.CompleteStepWithStatus(sr.ID, status, finalExitCode, durationMS, logPath); err != nil {
+	if err := e.db.CompleteStepWithValidation(sr.ID, status, finalExitCode, durationMS, logPath, run.HeadSHA, ConfigHash(e.config)); err != nil {
 		return false, fmt.Errorf("complete step %s: %w", stepName, err)
 	}
 	e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", "", &durationMS)
@@ -984,6 +1110,8 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	runStatus := types.RunFailed
 	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
 		runStatus = types.RunCancelled
+	} else if errMsg == types.RunInterruptReasonDaemonShuttingDown || errMsg == types.RunInterruptReasonDaemonCrashed {
+		runStatus = types.RunInterrupted
 	}
 	if dbErr := e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus); dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)

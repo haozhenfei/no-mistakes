@@ -10,16 +10,19 @@ import (
 type RunStatus string
 
 const (
-	RunPending   RunStatus = "pending"
-	RunRunning   RunStatus = "running"
-	RunCompleted RunStatus = "completed"
-	RunFailed    RunStatus = "failed"
-	RunCancelled RunStatus = "cancelled"
+	RunPending     RunStatus = "pending"
+	RunRunning     RunStatus = "running"
+	RunCompleted   RunStatus = "completed"
+	RunFailed      RunStatus = "failed"
+	RunCancelled   RunStatus = "cancelled"
+	RunInterrupted RunStatus = "interrupted"
 )
 
 const (
-	RunCancelReasonAbortedByUser = "cancelled: aborted by user"
-	RunCancelReasonSuperseded    = "cancelled: superseded by new push"
+	RunCancelReasonAbortedByUser         = "cancelled: aborted by user"
+	RunCancelReasonSuperseded            = "cancelled: superseded by new push"
+	RunInterruptReasonDaemonShuttingDown = "daemon shutting down"
+	RunInterruptReasonDaemonCrashed      = "daemon crashed during execution"
 )
 
 // StepName identifies a pipeline step.

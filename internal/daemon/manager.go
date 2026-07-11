@@ -290,6 +290,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
+			if err := preserveRunWorktreeHead(context.Background(), plan.gateDir, plan.workDir, plan.run.ID, plan.run.Branch); err != nil {
+				slog.Warn("failed to preserve recovered worktree head", "run_id", plan.run.ID, "path", plan.workDir, "error", err)
+			}
 			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
 				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
 			}
@@ -341,6 +344,247 @@ func agentListsEqual(a, b []types.AgentName) bool {
 	return true
 }
 
+// HandleResume resumes a previous terminal run for the current gate branch
+// head. Completed steps are reused only when their persisted validation inputs
+// match the head/config for this resume attempt; otherwise execution restarts
+// at the first invalidated step.
+func (m *RunManager) HandleResume(ctx context.Context, repoID, branch, headSHA, oldRunID string) (*ipc.ResumeResult, error) {
+	if m.shuttingDown.Load() {
+		return nil, fmt.Errorf("daemon is shutting down")
+	}
+	repo, err := m.db.GetRepo(repoID)
+	if err != nil {
+		return nil, fmt.Errorf("get repo: %w", err)
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("unknown repo %s", repoID)
+	}
+	if branch == "" {
+		return nil, fmt.Errorf("branch is required")
+	}
+
+	lockKey := repo.ID + "/" + branch
+	lockVal, _ := m.branchLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	branchMu := lockVal.(*sync.Mutex)
+	branchMu.Lock()
+	defer branchMu.Unlock()
+
+	if active, err := m.db.GetActiveRun(repo.ID, branch); err != nil {
+		return nil, fmt.Errorf("get active run: %w", err)
+	} else if active != nil {
+		return nil, fmt.Errorf("run %s is already active for branch %s", active.ID, branch)
+	}
+
+	gateDir := m.paths.RepoDir(repo.ID)
+	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
+	if err != nil {
+		return nil, fmt.Errorf("resolve gate head: %w", err)
+	}
+	if headSHA == "" {
+		headSHA = gateHead
+	}
+	if headSHA != gateHead {
+		return nil, fmt.Errorf("branch %s gate head is %s, not requested head %s", branch, gateHead, headSHA)
+	}
+
+	run, err := m.resumeSourceRun(repo.ID, branch, headSHA, oldRunID)
+	if err != nil {
+		return nil, err
+	}
+	run.HeadSHA = headSHA
+
+	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
+	if _, statErr := os.Stat(wtDir); statErr == nil {
+		if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
+			if removeErr := os.RemoveAll(wtDir); removeErr != nil {
+				return nil, fmt.Errorf("remove stale resume worktree: %w", removeErr)
+			}
+		}
+	} else if !os.IsNotExist(statErr) {
+		return nil, fmt.Errorf("inspect resume worktree: %w", statErr)
+	}
+	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
+		return nil, fmt.Errorf("create resume worktree: %w", err)
+	}
+	bgOwnsWorktree := false
+	defer func() {
+		if !bgOwnsWorktree {
+			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
+				slog.Warn("failed to remove resume worktree during setup cleanup", "path", wtDir, "error", rmErr)
+			}
+		}
+	}()
+	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
+		return nil, fmt.Errorf("configure resume worktree git identity: %w", err)
+	}
+
+	cfg, err := m.loadRecoveredConfig(ctx, run, repo, wtDir)
+	if err != nil {
+		return nil, err
+	}
+	ag, err := newPipelineAgent(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	execSteps := m.steps()
+	skipped := reusableResumeStepNames(m.db, run.ID, execSteps, headSHA, pipeline.ConfigHash(cfg))
+
+	runCtx, cancel := context.WithCancelCause(context.Background())
+	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	done := make(chan struct{})
+	m.mu.Lock()
+	m.executors[run.ID] = executor
+	m.cancels[run.ID] = cancel
+	m.dones[run.ID] = done
+	m.mu.Unlock()
+	m.markRunActiveForSubscribers(run.ID)
+	bgOwnsWorktree = true
+
+	m.wg.Add(1)
+	go func() {
+		startedAt := time.Now()
+		defer m.wg.Done()
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				errMsg := fmt.Sprintf("internal panic: %v", r)
+				slog.Error("panic in resumed pipeline goroutine", "run_id", run.ID, "panic", r)
+				run.Status = types.RunFailed
+				run.Error = &errMsg
+				if dbErr := m.db.UpdateRunErrorStatus(run.ID, errMsg, types.RunFailed); dbErr != nil {
+					slog.Error("failed to update resumed run after panic", "run_id", run.ID, "error", dbErr)
+				}
+			}
+			cancel(nil)
+			_ = ag.Close()
+			m.closeSubscribers(run.ID)
+			if err := preserveRunWorktreeHead(context.Background(), gateDir, wtDir, run.ID, run.Branch); err != nil {
+				slog.Warn("failed to preserve resumed worktree head", "run_id", run.ID, "path", wtDir, "error", err)
+			}
+			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
+				slog.Warn("failed to remove resume worktree", "path", wtDir, "error", rmErr)
+			}
+			m.mu.Lock()
+			delete(m.executors, run.ID)
+			delete(m.cancels, run.ID)
+			delete(m.dones, run.ID)
+			m.mu.Unlock()
+		}()
+
+		if err := executor.ResumeFrom(runCtx, run, repo, wtDir); err != nil {
+			slog.Error("resumed pipeline failed", "run_id", run.ID, "error", err)
+		}
+		fields := telemetry.Fields{
+			"action":      "finished",
+			"trigger":     "resume",
+			"agent":       string(cfg.Agent),
+			"branch_role": telemetryBranchRole(run.Branch, repo.DefaultBranch),
+			"status":      string(run.Status),
+			"duration_ms": time.Since(startedAt).Milliseconds(),
+			"step_count":  len(execSteps),
+			"pr_created":  run.PRURL != nil && *run.PRURL != "",
+		}
+		if failedStep := telemetryFailedStepName(m.db, run.ID); failedStep != "" {
+			fields["failed_step"] = failedStep
+		}
+		addRunPerformanceSummary(m.db, run.ID, fields)
+		telemetry.Track("run", fields)
+	}()
+
+	telemetry.Track("run", telemetry.Fields{
+		"action":      "started",
+		"trigger":     "resume",
+		"agent":       string(cfg.Agent),
+		"branch_role": telemetryBranchRole(branch, repo.DefaultBranch),
+		"step_count":  len(execSteps),
+		"demo_mode":   steps.IsDemoMode(),
+	})
+
+	return &ipc.ResumeResult{RunID: run.ID, FromRunID: run.ID, Skipped: skipped}, nil
+}
+
+func (m *RunManager) resumeSourceRun(repoID, branch, headSHA, oldRunID string) (*db.Run, error) {
+	if oldRunID != "" {
+		run, err := m.db.GetRun(oldRunID)
+		if err != nil {
+			return nil, fmt.Errorf("get resume run: %w", err)
+		}
+		if run == nil {
+			return nil, fmt.Errorf("run not found: %s", oldRunID)
+		}
+		if run.RepoID != repoID || run.Branch != branch {
+			return nil, fmt.Errorf("run %s belongs to %s/%s, not %s/%s", oldRunID, run.RepoID, run.Branch, repoID, branch)
+		}
+		if !pipeline.ResumableStatus(run.Status) {
+			return nil, fmt.Errorf("run %s is %s, not resumable", oldRunID, run.Status)
+		}
+		return run, nil
+	}
+	runs, err := m.db.GetRunsByRepoBranch(repoID, branch)
+	if err != nil {
+		return nil, fmt.Errorf("get branch runs: %w", err)
+	}
+	var fallback *db.Run
+	for _, run := range runs {
+		if !pipeline.ResumableStatus(run.Status) {
+			continue
+		}
+		if run.HeadSHA == headSHA {
+			return run, nil
+		}
+		if fallback == nil {
+			fallback = run
+		}
+	}
+	if fallback != nil {
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("no resumable run for branch %s", branch)
+}
+
+func reusableResumeStepNames(database *db.DB, runID string, steps []pipeline.Step, headSHA, configHash string) []string {
+	results, err := database.GetStepsByRun(runID)
+	if err != nil || len(results) != len(steps) {
+		return nil
+	}
+	var out []string
+	for i, result := range results {
+		if result.StepName != steps[i].Name() || !pipeline.CompletedStepReusable(result, headSHA, configHash) {
+			break
+		}
+		out = append(out, string(result.StepName))
+	}
+	return out
+}
+
+func preserveRunWorktreeHead(ctx context.Context, gateDir, workDir, runID, branch string) error {
+	if branch == "" {
+		return nil
+	}
+	headSHA, err := git.HeadSHA(ctx, workDir)
+	if err != nil || headSHA == "" {
+		return err
+	}
+	backupRef := "refs/no-mistakes/runs/" + runID + "/head"
+	if _, err := git.Run(ctx, gateDir, "update-ref", backupRef, headSHA); err != nil {
+		return fmt.Errorf("backup run head: %w", err)
+	}
+	branchRef := "refs/heads/" + branch
+	branchSHA, err := git.ResolveRef(ctx, gateDir, branchRef)
+	if err == nil {
+		if branchSHA == headSHA {
+			return nil
+		}
+		if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", branchSHA, headSHA); err != nil {
+			return fmt.Errorf("branch %s is not an ancestor of run head; preserved only at %s", branchRef, backupRef)
+		}
+	}
+	if _, err := git.Run(ctx, gateDir, "update-ref", branchRef, headSHA); err != nil {
+		return fmt.Errorf("update branch ref: %w", err)
+	}
+	return nil
+}
+
 // Subscribe registers a channel to receive events for a run.
 // Returns the channel and an unsubscribe function.
 // If the run has already completed, the returned channel is immediately closed.
@@ -367,6 +611,18 @@ func (m *RunManager) Subscribe(runID string) (<-chan ipc.Event, func()) {
 		}
 	}
 	return ch, unsub
+}
+
+func (m *RunManager) markRunActiveForSubscribers(runID string) {
+	m.subMu.Lock()
+	defer m.subMu.Unlock()
+	delete(m.completedRuns, runID)
+	for i := 0; i < len(m.completedOrder); i++ {
+		if m.completedOrder[i] == runID {
+			m.completedOrder = append(m.completedOrder[:i], m.completedOrder[i+1:]...)
+			i--
+		}
+	}
 }
 
 // broadcast sends an event to all subscribers of the event's run.
@@ -760,6 +1016,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
 			// Clean up worktree.
+			if err := preserveRunWorktreeHead(context.Background(), gateDir, wtDir, run.ID, run.Branch); err != nil {
+				slog.Warn("failed to preserve worktree head", "run_id", run.ID, "path", wtDir, "error", err)
+			}
 			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
 				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
 			}
@@ -877,7 +1136,7 @@ func (m *RunManager) Shutdown() {
 	m.mu.Unlock()
 
 	for id, cancel := range cancels {
-		cancel(fmt.Errorf("daemon shutting down"))
+		cancel(fmt.Errorf(types.RunInterruptReasonDaemonShuttingDown))
 		slog.Info("cancelled run on shutdown", "run_id", id)
 	}
 

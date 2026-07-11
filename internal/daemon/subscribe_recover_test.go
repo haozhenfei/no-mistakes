@@ -217,7 +217,7 @@ func TestSubscribeToCompletedRunReturnsClosedChannel(t *testing.T) {
 		if err := client.Call(ipc.MethodGetRun, &ipc.GetRunParams{RunID: pushResult.RunID}, &result); err != nil {
 			t.Fatal(err)
 		}
-		if result.Run != nil && (result.Run.Status == types.RunCompleted || result.Run.Status == types.RunFailed || result.Run.Status == types.RunCancelled) {
+		if result.Run != nil && (result.Run.Status == types.RunCompleted || result.Run.Status == types.RunFailed || result.Run.Status == types.RunCancelled || result.Run.Status == types.RunInterrupted) {
 			break
 		}
 		select {
@@ -245,7 +245,7 @@ func TestSubscribeToCompletedRunReturnsClosedChannel(t *testing.T) {
 	}
 }
 
-func TestRecoverStaleRunsOnStartup(t *testing.T) {
+func TestRecoverStaleRunsOnStartupLeavesRunResumable(t *testing.T) {
 	// Set up a DB with stale runs BEFORE starting the daemon.
 	tmpDir, err := os.MkdirTemp("", "dtest")
 	if err != nil {
@@ -316,16 +316,17 @@ func TestRecoverStaleRunsOnStartup(t *testing.T) {
 		}
 	})
 
-	// Verify the stale run was marked as failed.
+	// Verify the stale run was marked interrupted, not failed, so an explicit
+	// resume can reuse completed steps from the same head.
 	run, err := d.GetRun(staleRun.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.Status != types.RunFailed {
-		t.Errorf("stale run status = %q, want %q", run.Status, types.RunFailed)
+	if run.Status != types.RunInterrupted {
+		t.Errorf("stale run status = %q, want %q", run.Status, types.RunInterrupted)
 	}
-	if run.Error == nil || *run.Error != "daemon crashed during execution" {
-		t.Errorf("stale run error = %v, want %q", run.Error, "daemon crashed during execution")
+	if run.Error == nil || *run.Error != types.RunInterruptReasonDaemonCrashed {
+		t.Errorf("stale run error = %v, want %q", run.Error, types.RunInterruptReasonDaemonCrashed)
 	}
 
 	// Verify the stale step was marked as failed.

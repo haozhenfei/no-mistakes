@@ -68,11 +68,54 @@ func (d *DB) GetClaimsByRun(runID string) ([]claims.Claim, error) {
 	return out, rows.Err()
 }
 
+// DeleteClaimsByRun removes claims and their verify verdicts for a run. Resume
+// uses this when rerunning a step that can regenerate evidence-bound claims, so
+// stale conclusions from the previous attempt cannot survive under the same
+// run ID.
+func (d *DB) DeleteClaimsByRun(runID string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin delete claims by run: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM verify_verdicts WHERE run_id = ?`, runID); err != nil {
+		return fmt.Errorf("delete verify verdicts by run: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM claims WHERE run_id = ?`, runID); err != nil {
+		return fmt.Errorf("delete claims by run: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete claims by run: %w", err)
+	}
+	return nil
+}
+
 // SetClaimVerdict records the verify step's verdict on a claim.
 func (d *DB) SetClaimVerdict(claimID, verdict, verdictBy string) error {
 	_, err := d.sql.Exec(`UPDATE claims SET verdict = ?, verdict_by = ? WHERE id = ?`, verdict, verdictBy, claimID)
 	if err != nil {
 		return fmt.Errorf("set claim verdict: %w", err)
+	}
+	return nil
+}
+
+// DeleteVerifyVerdictsByRun removes verify adjudications and clears claim
+// verdict fields for a run. It preserves the claims themselves for cases where
+// verify is rerun but the test/QA evidence that produced claims is still valid.
+func (d *DB) DeleteVerifyVerdictsByRun(runID string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin delete verify verdicts by run: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM verify_verdicts WHERE run_id = ?`, runID); err != nil {
+		return fmt.Errorf("delete verify verdicts by run: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE claims SET verdict = NULL, verdict_by = NULL WHERE run_id = ?`, runID); err != nil {
+		return fmt.Errorf("clear claim verdicts by run: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete verify verdicts by run: %w", err)
 	}
 	return nil
 }
