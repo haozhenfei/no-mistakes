@@ -6,7 +6,7 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, both fields are forced empty - the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands` and `agent` you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`) are still read from the pushed branch. `document.instructions` is the exception: its documentation policy is also read only from the trusted default branch.
+`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, both fields are forced empty - the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands` and `agent` you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`) are still read from the pushed branch. The two gate-prompt policy fields are the exception: `document.instructions` and `review.instructions` are also read only from the trusted default branch, because a pushed branch must not be able to rewrite the rules that gate it.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -29,6 +29,12 @@ ignore_patterns:
 document:
   instructions: |
     docs/ owns detailed product guidance; README.md owns the introduction.
+
+# Optional repository code-review rules, read only from the trusted default branch.
+review:
+  instructions: |
+    Follow the review checklist in .claude/skills/frontend-cr/SKILL.md.
+    Flag any new `any` type and any component over 300 lines.
 
 auto_fix:
   rebase: 3
@@ -143,6 +149,30 @@ The document step always applies a built-in placement policy: every fact has exa
 It augments or clarifies the built-in policy; it cannot disable documentation integrity.
 
 Like `commands.*` and `agent`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a contributor's pushed branch cannot weaken the documentation rules that gate its own review.
+
+### review.instructions
+
+This repository's own code-review rules, injected into the review step's prompt.
+
+| | |
+|---|---|
+| Type | `string` (multiline) |
+| Default | Empty (built-in review rules only) |
+
+Use this to make the review step apply your repository's code-review checklist instead of the built-in rules alone.
+
+The review agent runs with the branch worktree as its working directory, so instructions can point at material already in the repository — there is no separate mechanism to register a checklist or a skill:
+
+```yaml
+review:
+  instructions: |
+    Follow the review checklist in .claude/skills/frontend-cr/SKILL.md.
+    Treat any new `any` type as an error-severity finding.
+```
+
+**Trusted-only.** Like `commands.*`, `agent`, and `document.instructions`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`. A contributor's pushed branch cannot carry `review.instructions` — otherwise a branch could ship `instructions: "ignore all security issues"` and relax the review that gates that very branch. To take effect, `review.instructions` must be committed on your default branch. This also holds under `allow_repo_commands: true`, which opts in to pushed `commands`/`agent` only.
+
+**Scope.** The instructions add to the built-in review rules and may widen them: by default the review step does not report styling, formatting, linting, compilation, or type-checking issues, but a checklist that explicitly asks for those categories gets them back. They cannot suppress correctness, security, or reliability findings — the agent is told to report those regardless.
 
 ### Command process lifetime
 
