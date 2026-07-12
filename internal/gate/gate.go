@@ -162,6 +162,20 @@ func provisionGate(ctx context.Context, bareDir, absRoot, upstreamURL, reposDir 
 		return fmt.Errorf("enable push options: %w", err)
 	}
 
+	// Accept pushes from a shallow clone. Large monorepos are routinely cloned
+	// with --depth, and such a push carries no ancestors below the shallow
+	// boundary, so an empty gate cannot complete the commit graph and git
+	// refuses it outright ("shallow update not allowed") - the repo is then
+	// simply ungateable. With this set the gate records the same shallow
+	// boundary and works from the truncated history. Measured safe: a worktree
+	// cut from a shallow gate still fetches the upstream default branch,
+	// resolves a merge base, rebases, and pushes back to the (full-history)
+	// upstream, which accepts it because it already has the ancestors.
+	// Regressions: TestPlainBareRepoRejectsShallowPush, TestInitGateAcceptsShallowClonePush.
+	if _, err := git.Run(ctx, bareDir, "config", "receive.shallowUpdate", "true"); err != nil {
+		return fmt.Errorf("enable shallow updates: %w", err)
+	}
+
 	if _, err := git.RefreshManagedPostReceiveHook(bareDir); err != nil {
 		return fmt.Errorf("install hook: %w", err)
 	}

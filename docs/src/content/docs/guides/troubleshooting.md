@@ -167,6 +167,15 @@ This means the branch was created from a local default branch that is ahead of `
 Push the default branch to `origin` if those commits belong in the shared base, or rebase your feature branch onto `origin/<default_branch>` to remove the unrelated work before running the gate again.
 Approve the finding only when you intentionally want that local default-branch work to stay in the branch.
 
+## Push to the gate is rejected with `shallow update not allowed`
+
+Your working repo is a shallow clone (`git clone --depth ...`), and its gate was
+created before gates accepted shallow pushes. Re-run `no-mistakes init` in the
+repo: it reconfigures the existing gate to take them (see
+[Bare gate repo](/no-mistakes/concepts/gate-model/#bare-gate-repo)). Restoring the full
+history with `git fetch --unshallow` also works and fixes every worktree at once,
+but it downloads the truncated history.
+
 ## `git push no-mistakes` doesn't start a pipeline
 
 Symptom: push succeeds but `no-mistakes` shows no active run.

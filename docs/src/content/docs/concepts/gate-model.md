@@ -89,6 +89,13 @@ instead of relying on working-directory discovery, so hardened environments
 that set `safe.bareRepository=explicit` (common in agent harnesses and CI)
 work unchanged.
 
+`no-mistakes init` sets `receive.shallowUpdate` on the gate, so a repository
+cloned with `--depth` (the norm for large monorepos) can be gated: its pushes
+carry no ancestors below the shallow boundary, and a gate without this setting
+refuses them outright. The gate then holds the same truncated history, which is
+enough to rebase and validate; the push target keeps the full history and
+accepts the branch.
+
 ### Daemon
 
 The daemon owns long-running work: creating worktrees, running the pipeline,
