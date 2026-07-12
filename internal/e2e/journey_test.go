@@ -190,8 +190,9 @@ func runHappyPath(t *testing.T, agentName string) {
 		}
 	}
 
-	// PR and CI must skip: no SCM provider on a file:// origin.
-	assertStepsSkipped(t, run.Steps, types.StepPR, types.StepCI)
+	// The PR step must skip: no SCM provider on a file:// origin. With no PR,
+	// the run also derives no watch run.
+	assertStepsSkipped(t, run.Steps, types.StepPR)
 	assertNoPRCreated(t, run)
 
 	// The agent must have been called at least for review and document.
@@ -974,7 +975,7 @@ func assertEmptyDiffAfterRebaseRun(t *testing.T, h *Harness) {
 	if run.Status != types.RunCompleted {
 		t.Fatalf("empty-after-rebase run did not complete: status=%s error=%v", run.Status, deref(run.Error))
 	}
-	for _, stepName := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI} {
+	for _, stepName := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR} {
 		step, ok := findStep(run.Steps, stepName)
 		if !ok {
 			t.Fatalf("expected %s step in empty-after-rebase run", stepName)
@@ -2605,7 +2606,9 @@ func assertPushedHead(t *testing.T, runHeadSHA, upstreamHeadSHA string) {
 
 func assertPipelineStepsInOrder(t *testing.T, steps []ipc.StepResultInfo) {
 	t.Helper()
-	expected := []types.StepName{types.StepIntent, types.StepRebase, types.StepReview, types.StepTest, types.StepVerify, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI}
+	// The gate pipeline ends at the PR. Post-PR monitoring is a watch run's
+	// job (see TestPRHandsOffToWatchRun), so there is no blocking ci step here.
+	expected := []types.StepName{types.StepIntent, types.StepRebase, types.StepFix, types.StepReview, types.StepTest, types.StepVerify, types.StepDocument, types.StepLint, types.StepPush, types.StepPR}
 	if len(steps) != len(expected) {
 		t.Fatalf("pipeline recorded %d steps, want %d", len(steps), len(expected))
 	}

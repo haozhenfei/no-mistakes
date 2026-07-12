@@ -42,6 +42,15 @@ type RunManager struct {
 	db           *db.DB
 	paths        *paths.Paths
 	steps        StepFactory
+	// watchStepFactory overrides the watch run's steps (tests only).
+	watchStepFactory StepFactory
+
+	// watchFixRequests holds the findings a driving agent selected when it
+	// answered a parked watch run with `fix`. The fix cannot happen inside the
+	// watch run (it owns no worktree), so the request waits here until the watch
+	// run is terminal and the manager can derive a gate run from it.
+	watchFixMu       sync.Mutex
+	watchFixRequests map[string]string
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -57,15 +66,22 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
 	return &RunManager{
-		executors:     make(map[string]*pipeline.Executor),
-		cancels:       make(map[string]context.CancelCauseFunc),
-		dones:         make(map[string]chan struct{}),
-		db:            database,
-		paths:         p,
-		steps:         stepFactory,
-		subscribers:   make(map[string][]chan<- ipc.Event),
-		completedRuns: make(map[string]bool),
+		executors:        make(map[string]*pipeline.Executor),
+		cancels:          make(map[string]context.CancelCauseFunc),
+		dones:            make(map[string]chan struct{}),
+		db:               database,
+		paths:            p,
+		steps:            stepFactory,
+		watchFixRequests: make(map[string]string),
+		subscribers:      make(map[string][]chan<- ipc.Event),
+		completedRuns:    make(map[string]bool),
 	}
+}
+
+// SetWatchStepFactory overrides the steps a watch run executes. Tests use it to
+// substitute a fake poller; production always uses steps.WatchSteps.
+func (m *RunManager) SetWatchStepFactory(factory StepFactory) {
+	m.watchStepFactory = factory
 }
 
 type recoveredRunPlan struct {
@@ -87,9 +103,18 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 	plans := make([]recoveredRunPlan, 0, len(runs))
 	branchCounts := make(map[string]int, len(runs))
 	for _, run := range runs {
+		if run.Kind.Watch() {
+			// Watch runs are not resumed from a parked gate; they are re-armed
+			// from scratch (rearmWatchRuns). They also hold no worktree, so they
+			// must not make a gate run on the same branch look ambiguous.
+			continue
+		}
 		branchCounts[run.RepoID+"\x00"+run.Branch]++
 	}
 	for _, run := range runs {
+		if run.Kind.Watch() {
+			continue
+		}
 		if branchCounts[run.RepoID+"\x00"+run.Branch] != 1 {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", "conflicting active run for branch")
 			continue
@@ -346,6 +371,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			delete(m.cancels, plan.run.ID)
 			delete(m.dones, plan.run.ID)
 			m.mu.Unlock()
+
+			// A recovered run that reached its PR hands it off like any other.
+			m.deriveWatchRun(plan.run, plan.repo)
 		}()
 
 		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
@@ -520,6 +548,12 @@ func (m *RunManager) HandleResume(ctx context.Context, repoID, branch, headSHA, 
 			delete(m.cancels, run.ID)
 			delete(m.dones, run.ID)
 			m.mu.Unlock()
+
+			// The common reason to resume is a run that died at or before the pr
+			// step. When the resumed run does reach a PR, it hands it off exactly
+			// like a fresh one - otherwise the PR that resume just opened would be
+			// the one PR nobody watches.
+			m.deriveWatchRun(run, repo)
 		}()
 
 		if err := executor.ResumeFrom(runCtx, run, repo, wtDir); err != nil {
@@ -792,7 +826,14 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
+	return m.startRun(ctx, repo, runSpec{
+		branch:    branch,
+		headSHA:   params.New,
+		baseSHA:   params.Old,
+		trigger:   "push",
+		skipSteps: params.SkipSteps,
+		intent:    params.Intent,
+	})
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
@@ -840,13 +881,35 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 		baseSHA = matchingHead.BaseSHA
 	}
 
-	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent)
+	return m.startRun(ctx, repo, runSpec{
+		branch:    branch,
+		headSHA:   headSHA,
+		baseSHA:   baseSHA,
+		trigger:   "rerun",
+		skipSteps: skipSteps,
+		intent:    intent,
+	})
 }
 
-// startRun creates a run, sets up a worktree, and launches pipeline execution.
-// A non-empty intent is stamped onto the run as agent-supplied, so the intent
-// step uses it instead of inferring from transcripts.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string) (string, error) {
+// runSpec is everything a new gate run is born with. parentRunID is set only
+// for a fix round derived from a watch run; the fix step reads its seed findings
+// through it.
+type runSpec struct {
+	branch      string
+	headSHA     string
+	baseSHA     string
+	trigger     string
+	skipSteps   []types.StepName
+	intent      string
+	parentRunID string
+}
+
+// startRun creates a gate run, sets up a worktree, and launches pipeline
+// execution. A non-empty intent is stamped onto the run as agent-supplied, so
+// the intent step uses it instead of inferring from transcripts.
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) (string, error) {
+	branch, headSHA, baseSHA, trigger := spec.branch, spec.headSHA, spec.baseSHA, spec.trigger
+	skipSteps, intent := spec.skipSteps, spec.intent
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -870,14 +933,19 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	branchMu.Lock()
 	defer branchMu.Unlock()
 
-	// Cancel any active run for this repo+branch.
-	m.cancelActiveRuns(repo.ID, branch)
+	// Supersede the branch's previous gate run and its watcher: this run is
+	// about to move the head both of them were built on.
+	m.cancelActiveRuns(repo.ID, branch, types.RunKindGate)
 
 	// Create run record. The skip set is stored on the row so a later resume of
 	// this run skips the same steps: `axi resume` carries no --skip flag, and a
 	// skipped step is not `completed`, so without the persisted set resume would
 	// re-execute exactly the steps the caller asked to skip.
-	run, err := m.db.InsertRunWithSkipSteps(repo.ID, branch, headSHA, baseSHA, skipSteps)
+	run, err := m.db.InsertRunWithOptions(repo.ID, branch, headSHA, baseSHA, db.RunOptions{
+		Kind:        types.RunKindGate,
+		ParentRunID: spec.parentRunID,
+		SkipSteps:   skipSteps,
+	})
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
@@ -1046,6 +1114,12 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
+		// handOffPR is set when the pipeline completes with a PR. The handoff
+		// itself happens at the very end of the cleanup below, after the
+		// worktree is released: a watch run must never coexist with the gate
+		// worktree it replaced, or "the PR no longer pins a worktree" would be
+		// true only eventually.
+		handOffPR := false
 		defer m.wg.Done()
 		defer close(done)
 		defer func() {
@@ -1090,6 +1164,10 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			delete(m.cancels, run.ID)
 			delete(m.dones, run.ID)
 			m.mu.Unlock()
+
+			if handOffPR {
+				m.deriveWatchRun(run, repo)
+			}
 		}()
 
 		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
@@ -1123,10 +1201,40 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			addRunPerformanceSummary(m.db, run.ID, fields)
 			telemetry.Track("run", fields)
 			slog.Info("pipeline completed", "run_id", run.ID)
+			handOffPR = true
 		}
 	}()
 
 	return run.ID, nil
+}
+
+// deriveWatchRun hands a finished gate run's PR to a watch run. It is the whole
+// gate->watch handoff: the gate run is complete and its worktree is about to be
+// released, and from here on the PR's state lives on the server, so what takes
+// over holds nothing locally.
+//
+// A gate run that ended without a PR (no changes, PR step skipped, run failed)
+// derives nothing - there is nothing to watch.
+func (m *RunManager) deriveWatchRun(run *db.Run, repo *db.Repo) {
+	if run == nil || repo == nil || run.Kind.Watch() {
+		return
+	}
+	if run.Status != types.RunCompleted {
+		return
+	}
+	if run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" {
+		return
+	}
+	if m.shuttingDown.Load() {
+		slog.Info("daemon shutting down; not deriving watch run", "gate_run_id", run.ID)
+		return
+	}
+	watchID, err := m.startWatchRun(context.Background(), repo, run)
+	if err != nil {
+		slog.Error("failed to derive watch run for PR", "gate_run_id", run.ID, "pr_url", *run.PRURL, "error", err)
+		return
+	}
+	slog.Info("watch run took over the PR", "gate_run_id", run.ID, "watch_run_id", watchID, "pr_url", *run.PRURL)
 }
 
 // addRunPerformanceSummary attaches the bounded per-run performance rollup
@@ -1182,7 +1290,41 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 		return fmt.Errorf("no active executor for run %s", runID)
 	}
 
+	// A `fix` on a parked watch run cannot be executed by the watch run: it owns
+	// no worktree, and a fix that bypassed review/test/lint is exactly what this
+	// split removed. Record the request, let the watch step complete, and derive
+	// a gate run from it - the same path a failing CI check takes.
+	if step == types.StepWatch && action == types.ActionFix {
+		findings, err := m.selectedWatchFindings(runID, findingIDs, instructions, addedFindings)
+		if err != nil {
+			return err
+		}
+		m.requestWatchFix(runID, findings)
+		return exec.RespondWithOverrides(step, types.ActionApprove, nil, nil, nil)
+	}
+
 	return exec.RespondWithOverrides(step, action, findingIDs, instructions, addedFindings)
+}
+
+// selectedWatchFindings narrows a parked watch run's findings to the ones the
+// agent selected, carrying over any instructions and user-authored findings, and
+// re-serializes them as the seed for the derived fix run.
+func (m *RunManager) selectedWatchFindings(runID string, findingIDs []string, instructions map[string]string, added []types.Finding) (string, error) {
+	results, err := m.db.GetStepsByRun(runID)
+	if err != nil {
+		return "", fmt.Errorf("load watch findings: %w", err)
+	}
+	raw := ""
+	for _, sr := range results {
+		if sr.StepName == types.StepWatch && sr.FindingsJSON != nil {
+			raw = *sr.FindingsJSON
+			break
+		}
+	}
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("watch run %s has no findings to fix", runID)
+	}
+	return pipeline.SelectFindingsJSON(raw, findingIDs, instructions, added), nil
 }
 
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent
@@ -1228,12 +1370,26 @@ func (m *RunManager) HandleCancel(runID string) error {
 	return nil
 }
 
-// cancelActiveRuns cancels any in-progress runs for the given repo+branch
-// and waits for their goroutines to finish before returning, preventing
-// concurrent pushes to upstream.
-// The cancellation cause is propagated to the executor via context.Cause,
-// which uses it as the run's error message in the DB.
-func (m *RunManager) cancelActiveRuns(repoID, branch string) {
+// cancelActiveRuns cancels the in-progress runs on repo+branch that the
+// incoming run of kind supersedes, and waits for their goroutines to exit.
+//
+// Which runs a new run supersedes depends on its kind, and getting this wrong
+// is not cosmetic:
+//
+//   - A new GATE run supersedes both the old gate run (two pipelines must never
+//     push the same branch concurrently) and any watch run on that branch: the
+//     new gate run is about to move the branch head, so the PR head the watch
+//     run is polling is already stale.
+//
+//   - A new WATCH run supersedes only other watch runs. It must NOT cancel gate
+//     runs. A fix round is a gate run derived from a watch run: if a watch run
+//     cancelled gate runs, deriving one would kill it, and if a gate run's own
+//     derived watch run cancelled it, the gate run would be cancelled the
+//     instant it succeeded. The pre-split code cancelled by branch alone, and a
+//     push during CI monitoring silently destroyed the monitor - the only CI
+//     step this database has ever run died exactly that way, as
+//     `context canceled`, with no record that the PR still owed a check.
+func (m *RunManager) cancelActiveRuns(repoID, branch string, kind types.RunKind) {
 	runs, err := m.db.GetRunsByRepo(repoID)
 	if err != nil {
 		slog.Error("failed to query active runs for cancellation", "repo", repoID, "branch", branch, "error", err)
@@ -1248,6 +1404,9 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		if run.Status != types.RunPending && run.Status != types.RunRunning {
 			continue
 		}
+		if !supersedes(kind, run.Kind) {
+			continue
+		}
 
 		m.mu.Lock()
 		cancel, ok := m.cancels[run.ID]
@@ -1258,7 +1417,7 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		}
 
 		cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
-		slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch)
+		slog.Info("cancelled active run", "run_id", run.ID, "run_kind", string(run.Kind), "superseded_by", string(kind), "repo_id", repoID, "branch", branch)
 		if done != nil {
 			toWait = append(toWait, done)
 		}
@@ -1273,4 +1432,16 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 			return
 		}
 	}
+}
+
+// supersedes reports whether a starting run of kind incoming takes over from an
+// active run of kind existing on the same branch.
+func supersedes(incoming, existing types.RunKind) bool {
+	if incoming.Watch() {
+		// A watch run replaces the branch's previous watcher and nothing else.
+		return existing.Watch()
+	}
+	// A gate run moves the branch head, invalidating both the previous gate run
+	// and whatever was watching the old head.
+	return true
 }

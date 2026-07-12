@@ -377,6 +377,7 @@ func TestAllStepsHasNoQAStep(t *testing.T) {
 	want := []types.StepName{
 		types.StepIntent,
 		types.StepRebase,
+		types.StepFix,
 		types.StepReview,
 		types.StepTest,
 		types.StepVerify,
@@ -384,7 +385,6 @@ func TestAllStepsHasNoQAStep(t *testing.T) {
 		types.StepLint,
 		types.StepPush,
 		types.StepPR,
-		types.StepCI,
 	}
 	steps := AllSteps()
 	if len(steps) != len(want) {

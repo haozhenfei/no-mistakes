@@ -17,8 +17,17 @@ type Run struct {
 	HeadSHA string
 	BaseSHA string
 	Status  types.RunStatus
-	PRURL   *string
-	Error   *string
+	// Kind is the run's side of the PR boundary: a gate run (intent..pr, owns a
+	// worktree) or a watch run (post-PR poller, owns no local state). Rows
+	// written before the split read back as gate.
+	Kind types.RunKind
+	// ParentRunID links a derived run back to the run that spawned it: a watch
+	// run points at the gate run whose pr step opened the PR, and a fix gate
+	// run points at the watch run that found the problem. It is how a fix run
+	// finds its seed findings and how the daemon bounds fix-round depth.
+	ParentRunID *string
+	PRURL       *string
+	Error       *string
 	// AwaitingAgentSince is the unix-seconds timestamp at which the run parked
 	// at a gate awaiting the driving agent's response (an awaiting_approval or
 	// fix_review step). It is nil whenever the run is not parked: the executor
@@ -44,7 +53,7 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), skip_steps, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, COALESCE(kind, 'gate'), parent_run_id, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), skip_steps, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -52,6 +61,7 @@ func scanRun(row interface {
 	var skipSteps *string
 	if err := row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
+		&r.Kind, &r.ParentRunID,
 		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS, &skipSteps,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.CreatedAt, &r.UpdatedAt,
@@ -93,17 +103,37 @@ func decodeSkipSteps(raw *string) ([]types.StepName, error) {
 	return steps, nil
 }
 
-// InsertRun creates a new run record with no skipped steps.
-func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
-	return d.InsertRunWithSkipSteps(repoID, branch, headSHA, baseSHA, nil)
+// RunOptions carries the properties fixed at a run's birth: what kind of run it
+// is, which run derived it, and which steps it was told to skip. All three are
+// written with the row rather than by a later UPDATE, so a crash between insert
+// and update can never leave a run whose identity is only in memory.
+type RunOptions struct {
+	Kind        types.RunKind
+	ParentRunID string
+	SkipSteps   []types.StepName
 }
 
-// InsertRunWithSkipSteps creates a new run record and records the steps the
-// caller asked to skip. The skip set is written with the row (not by a later
-// UPDATE) so a crash can never leave a run whose steps were skipped in memory
-// but not on disk - resume reads this column back and would otherwise revive
-// them.
+// InsertRun creates a new gate run record with no skipped steps.
+func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
+	return d.InsertRunWithOptions(repoID, branch, headSHA, baseSHA, RunOptions{})
+}
+
+// InsertRunWithSkipSteps creates a new gate run record and records the steps the
+// caller asked to skip. The skip set is a property of the run, so a later resume
+// skips the same steps instead of reviving them.
 func (d *DB) InsertRunWithSkipSteps(repoID, branch, headSHA, baseSHA string, skipSteps []types.StepName) (*Run, error) {
+	return d.InsertRunWithOptions(repoID, branch, headSHA, baseSHA, RunOptions{SkipSteps: skipSteps})
+}
+
+// InsertRunWithOptions creates a new run record of the requested kind.
+func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts RunOptions) (*Run, error) {
+	kind := opts.Kind
+	if kind == "" {
+		kind = types.RunKindGate
+	}
+	if !kind.Valid() {
+		return nil, fmt.Errorf("insert run: unknown run kind %q", kind)
+	}
 	ts := now()
 	r := &Run{
 		ID:        newID(),
@@ -112,20 +142,25 @@ func (d *DB) InsertRunWithSkipSteps(repoID, branch, headSHA, baseSHA string, ski
 		HeadSHA:   headSHA,
 		BaseSHA:   baseSHA,
 		Status:    types.RunPending,
-		SkipSteps: skipSteps,
+		Kind:      kind,
+		SkipSteps: opts.SkipSteps,
 		CreatedAt: ts,
 		UpdatedAt: ts,
 	}
-	if len(skipSteps) == 0 {
+	if len(opts.SkipSteps) == 0 {
 		r.SkipSteps = nil
+	}
+	if opts.ParentRunID != "" {
+		parent := opts.ParentRunID
+		r.ParentRunID = &parent
 	}
 	encoded, err := encodeSkipSteps(r.SkipSteps)
 	if err != nil {
 		return nil, err
 	}
 	_, err = d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, skip_steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, encoded, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, kind, parent_run_id, skip_steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.Kind, r.ParentRunID, encoded, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

@@ -275,7 +275,7 @@ func pipelineOrderedStepStats(stats []db.StepStats) []db.StepStats {
 	}
 	ordered := make([]db.StepStats, 0, len(stats))
 	seen := make(map[types.StepName]bool, len(stats))
-	for _, step := range types.AllSteps() {
+	for _, step := range types.KnownSteps() {
 		stat, ok := byStep[step]
 		if !ok {
 			continue

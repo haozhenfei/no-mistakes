@@ -286,10 +286,10 @@ func TestModel_Update_RerunStartedBackfillsMissingPipelineSteps(t *testing.T) {
 	updated, _ := m.Update(rerunStartedMsg{run: newRun})
 	model := updated.(Model)
 
-	if len(model.steps) != len(types.AllSteps()) {
-		t.Fatalf("step count = %d, want %d", len(model.steps), len(types.AllSteps()))
+	if len(model.steps) != len(types.GateSteps()) {
+		t.Fatalf("step count = %d, want %d", len(model.steps), len(types.GateSteps()))
 	}
-	for i, stepName := range types.AllSteps() {
+	for i, stepName := range types.GateSteps() {
 		if model.steps[i].StepName != stepName {
 			t.Fatalf("step %d = %s, want %s", i, model.steps[i].StepName, stepName)
 		}
@@ -304,7 +304,7 @@ func TestModel_Update_RerunStartedBackfillsMissingPipelineSteps(t *testing.T) {
 	}
 
 	plain := stripANSI(renderPipelineView(model.run, model.steps, 80, 0, 40))
-	for _, label := range []string{"Intent", "Rebase", "Review", "Test", "Document", "Lint", "Push", "PR", "CI"} {
+	for _, label := range []string{"Intent", "Rebase", "Review", "Test", "Document", "Lint", "Push", "PR"} {
 		if !strings.Contains(plain, label) {
 			t.Fatalf("expected pipeline view to contain %q, got:\n%s", label, plain)
 		}
@@ -334,10 +334,10 @@ func TestModel_Update_RerunStartedBackfillsEmptyRunningPipelineSteps(t *testing.
 	updated, _ := m.Update(rerunStartedMsg{run: newRun})
 	model := updated.(Model)
 
-	if len(model.steps) != len(types.AllSteps()) {
-		t.Fatalf("step count = %d, want %d", len(model.steps), len(types.AllSteps()))
+	if len(model.steps) != len(types.GateSteps()) {
+		t.Fatalf("step count = %d, want %d", len(model.steps), len(types.GateSteps()))
 	}
-	for i, stepName := range types.AllSteps() {
+	for i, stepName := range types.GateSteps() {
 		if model.steps[i].StepName != stepName {
 			t.Fatalf("step %d = %s, want %s", i, model.steps[i].StepName, stepName)
 		}

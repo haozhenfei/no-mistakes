@@ -142,16 +142,20 @@ If your home directory consolidates `.claude` and `.agents` with symlinks, `init
 Re-run `no-mistakes init` after an upgrade to refresh that skill, including overwriting stale `SKILL.md` content from an older binary.
 Older versions vendored the skill into each initialized repo's `.claude/skills` and `.agents/skills`; those copies are no longer needed, and `init` prints a notice when it finds one so you can remove it.
 The skill drives `no-mistakes axi`, a non-interactive command surface that prints TOON to stdout and progress to stderr.
-When CI is green but the PR is still open, `axi run` and `axi respond` return `outcome: checks-passed` with a help line pointing at the PR instead of waiting for a human merge.
+The pipeline an agent drives ends at the PR: `axi run` returns `outcome: passed` with a help line pointing at the PR as soon as the PR exists, instead of waiting for CI or for a human merge.
 That is a successful agent stopping point: report that the PR is ready and ask the user to review and merge it.
+A [watch run](/no-mistakes/concepts/pipeline/#watch-runs) takes the PR over from there, so the agent never polls CI itself.
 Successful outcomes also instruct the agent to summarize the run for the user.
 When the pipeline applied fixes, successful outcomes include a `fixes` table listing each fix so the agent can acknowledge what it missed and the user can review them.
 
-If that PR later falls behind the default branch or hits a merge conflict - commonly because another PR merged first - the agent runs no command and must never hand-rebase.
-The CI monitor stays live in the background after checks pass, and when it sees an actual conflict it rebases onto the base, resolves it, and re-pushes the branch itself, so no agent or user action is needed.
+If that PR later falls behind the default branch, hits a merge conflict, or fails CI - commonly because another PR merged first - the agent runs no command and must never hand-rebase.
+The watch run stays live in the background, and when it sees a problem it can fix it derives a fresh gate run that rebases onto the base, fixes it, and re-pushes the branch itself, so no agent or user action is needed.
 A PR that is merely behind but still clean needs nothing either, since the platform merges it.
-The one exception is when that monitor is no longer running - the PR was closed, the run was aborted or superseded, it idle-timed-out, or its auto-fix attempts were exhausted - in which case the agent recovers with `no-mistakes rerun`, which cancels the stale monitor and re-runs the full pipeline including a deterministic rebase step.
-The agent must not use `no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it reattaches to the running monitor with HEAD unchanged and returns the monitor output without rebasing.
+The one exception is when nothing is watching the PR any more - it was closed, the run was aborted or superseded, it idle-timed-out, or its fix budget was exhausted - in which case the agent recovers with `no-mistakes rerun`, which re-runs the full pipeline including a deterministic rebase step.
+The agent must not use `no-mistakes axi run` to refresh a still-watched PR.
+
+Unresolved comment threads on the PR and a green PR that is only waiting on someone's approval are escalations, not auto-fixes: the watch run parks and asks rather than rewriting code in answer to a comment.
+That is the same conservative stance `auto_fix.review: 0` takes inside the gate, and it exists because an unresolved thread may carry a human reviewer's opinion.
 
 In task-first mode, if the repo is on the default branch, the skill tells the agent to create a feature branch before committing because the gate validates committed history on a non-default branch.
 The agent should inspect `git status` before changing or committing anything, preserve unrelated pre-existing uncommitted changes, and commit only the changes that belong to the user's task.

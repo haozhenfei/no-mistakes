@@ -85,13 +85,24 @@ That reduces surprising machine-level side effects and macOS App Management prom
 While executing steps, the daemon also owns child-process cleanup.
 Configured commands and one-shot agent subprocesses are terminated as a process tree on completion, failure, or cancellation so leaked test workers, build watchers, or dev servers cannot accumulate across runs.
 
+## Run kinds
+
+The daemon runs two kinds of run, split at the PR - which is where ownership of the state changes hands (see [Pipeline](/no-mistakes/concepts/pipeline/#watch-runs)):
+
+- **gate** (`kind: gate`) - the validation pipeline, `intent` through `pr`. It owns a worktree for its whole life and releases it the moment it finishes.
+- **watch** (`kind: watch`) - a poller over the PR a gate run opened. It owns no worktree, launches no agent, and its entire state is the PR itself.
+
+A gate run that opens a PR derives a watch run for it. A watch run that finds a fixable problem derives a new gate run (recorded on `parent_run_id`), which fixes it and re-crosses the whole gate before the PR sees the change. Neither ever patches the branch from inside a watch run.
+
 ## Concurrent push handling
 
 If you push to the same branch while a run is already active, the daemon:
 
-1. Cancels the in-progress run (reason: "cancelled: superseded by new push")
-2. Waits for it to finish
-3. Starts a new run with the latest push
+1. Cancels the in-progress gate run, and the branch's watch run too (reason: "cancelled: superseded by new push") - the new push moves the head both were built on
+2. Waits for them to finish
+3. Starts a new gate run with the latest push
+
+A *watch* run starting only supersedes the branch's previous watch run: it must never cancel a gate run, or a derived fix round would kill the run that ordered it.
 
 Pushes to different branches run concurrently.
 
@@ -109,6 +120,8 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Reapplies per-worktree gate hook-path isolation to existing bare repos when Git supports `config --worktree`, so shared `core.hookspath` writes cannot disable `post-receive`
 - Enables Git push-option support on existing gate repos so per-push options like `no-mistakes.skip=...` keep working after upgrades
 - Clears any parked-awaiting-agent marker so a recovered failed run is not shown as still waiting for `axi respond`
+
+Watch runs are the exception, and deliberately so: they hold no local state, so nothing about them can be lost in a crash. Instead of being marked failed and waiting for someone to resume them, an interrupted watch run is **re-armed** - its stale step rows are dropped and it polls its PR again from scratch. A crash therefore never leaves a PR with nobody watching it.
 
 ## Logging
 

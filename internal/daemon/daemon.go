@@ -269,9 +269,18 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	migrateGateConfigs(context.Background(), p)
 
 	plans := mgr.recoverableParkedRuns(context.Background())
-	preserved := make(map[string]struct{}, len(plans))
+	// Watch runs are never "interrupted awaiting a human": they hold no local
+	// state, so the honest recovery is to re-arm them and ask the PR again.
+	// They must be preserved from the stale sweep BEFORE it runs, or the sweep
+	// would leave a PR with nobody watching it and no record that it once had a
+	// watcher.
+	watchRuns := mgr.resumableWatchRuns()
+	preserved := make(map[string]struct{}, len(plans)+len(watchRuns))
 	for _, plan := range plans {
 		preserved[plan.run.ID] = struct{}{}
+	}
+	for _, run := range watchRuns {
+		preserved[run.ID] = struct{}{}
 	}
 	count, err := d.RecoverStaleRunsExcept(types.RunInterruptReasonDaemonCrashed, preserved)
 	if err != nil {
@@ -287,6 +296,9 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 
 	cleanupOrphanWorktrees(d, p)
 	mgr.resumeRecoveredRuns(plans)
+	if rearmed := mgr.rearmWatchRuns(context.Background(), watchRuns); len(rearmed) > 0 {
+		slog.Info("re-armed watch runs after restart", "count", len(rearmed))
+	}
 }
 
 // cleanupOrphanWorktrees removes worktree directories left behind by runs

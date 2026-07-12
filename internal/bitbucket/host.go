@@ -290,3 +290,13 @@ func failedPipelineUUIDs(statuses []CommitStatus, failingNames []string) map[str
 	}
 	return targets
 }
+
+// ListReviewThreads and GetReviewState are not wired for Bitbucket yet; both
+// degrade to ErrUnsupported, matching Capabilities.
+func (h *Host) ListReviewThreads(_ context.Context, _ *scm.PR) ([]scm.ReviewThread, error) {
+	return nil, scm.ErrUnsupported
+}
+
+func (h *Host) GetReviewState(_ context.Context, _ *scm.PR) (scm.ReviewState, error) {
+	return "", scm.ErrUnsupported
+}

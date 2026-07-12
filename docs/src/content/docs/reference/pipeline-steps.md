@@ -6,8 +6,11 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```
-intent → rebase → review → test → verify → document → lint → push → pr → ci
+gate run:   intent → rebase → fix → review → test → verify → document → lint → push → pr
+watch run:  watch
 ```
+
+A gated push runs the gate pipeline, which ends at the PR. The `watch` step is the whole of a [watch run](/no-mistakes/concepts/pipeline/#watch-runs), which the gate run derives once the PR exists.
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
 In the TUI, yolo mode is an explicit override that auto-resolves paused steps: `auto-fix` and `ask-user` findings are fixed once with every finding selected, fix-review gates are approved, and gates with only `no-op` findings are approved as-is.
@@ -54,6 +57,18 @@ Fetches the latest authoritative remote state, fetches the configured pushed-bra
 **Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` in a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior-round history in the prompt. Commits use the message format `no-mistakes(rebase): <summary>`.
 
 **Default auto-fix limit:** `3`.
+
+## Fix
+
+Applies the findings a watch run handed to this gate run. It does nothing at all in every other run.
+
+This is where the post-PR loop closes. A watch run never edits code: when it finds a problem it derives a gate run whose `parent_run_id` points back at it, and this step reads the findings off that parent's `watch` step and hands them to the agent. It runs after `rebase` (so the fix lands on a current base) and before `review` (so the fix is reviewed like any other change).
+
+**Behavior:**
+- Skips when the run has no parent run, or when the parent recorded no findings - which is every ordinary gated push
+- Fetches the failing checks' logs where the provider supports it, so the agent sees why a check failed rather than only that it did
+- Commits the agent's changes as `no-mistakes(fix): ...`; the rest of the gate then reviews, tests, and lints them before they reach the PR
+- If the agent produces no changes, pauses for approval with the original findings instead of pushing on: re-opening the same PR with the same failure would derive the same watch run and loop
 
 ## Review
 
@@ -203,39 +218,32 @@ Creates or updates a pull request.
 
 Stores the PR URL in the database and streams it to the TUI.
 
-## CI
+## Watch
 
-Monitors PR health after creation and auto-fixes CI failures. Mergeability polling and merge-conflict handling now apply to GitHub, GitLab, and Azure DevOps.
+Monitors the PR after the gate run has ended. It is the only step of a watch run, holds no worktree, and invokes no agent.
 
-**Active for GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), and Azure DevOps (`dev.azure.com` / `*.visualstudio.com`)**.
+**Active for GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), Azure DevOps (`dev.azure.com` / `*.visualstudio.com`), and ByteDance Codebase**.
 
 - GitHub requires `gh` CLI, installed and authenticated.
 - GitLab requires `glab` CLI, installed and authenticated.
 - Bitbucket Cloud requires `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN`.
 - Azure DevOps requires the `az` CLI with the `azure-devops` extension, authenticated with a PAT.
+- Codebase requires `bytedcli`, installed and authenticated.
+
+Review threads and approval state are read on GitHub and Codebase; the other providers report `unsupported` for those two signals, and the watch run says so rather than assuming there are none.
 
 **Behavior:**
-- Polls provider CI status at increasing intervals: every 30s for the first 5 minutes, every 60s for 5-15 minutes, every 120s after that
-- Continues monitoring an open PR until it is merged, closed, declined, or the configured `ci_timeout` idle window elapses, even after CI checks are currently healthy
-- Treats `ci_timeout` as an idle timeout: each upstream default-branch advance re-arms the timer, and `ci_timeout: "unlimited"` disables self-termination
-- On GitHub, GitLab, and Azure DevOps, polls provider mergeability alongside CI checks while the PR remains open
-- While the PR stays open, the TUI and terminal title show `Checks passed` once checks are green and known mergeability is clear, and `no-mistakes axi` returns `outcome: checks-passed` with successful-output reporting instructions so agents can summarize the run, ask the user to review and merge, and list any pipeline fixes instead of waiting
-- If the default branch moves after `checks-passed`, keeps watching the same PR; a clean behind PR needs no action, while an actual GitHub, GitLab, or Azure DevOps merge conflict is auto-fixed by rebasing onto the base and re-pushing through the force-push safety guard
-- The ready signal clears if checks start running again, new failures appear, provider state becomes uncertain, or the PR is merged, closed, or declined
-- Waits a 60s grace period before trusting empty results (CI checks may not have registered yet)
-- If CI failures or, on GitHub, GitLab, or Azure DevOps, a merge conflict are already known while other checks are still pending: waits for all checks to finish before attempting an auto-fix
-- On CI failure: fetches failed job logs (GitHub via `gh run view --log-failed`, GitLab via `glab ci trace`, Bitbucket Cloud via failed pipeline step logs; Azure DevOps has no first-class build-log command, so the agent fixes from the failing-check list without logs), sends them to the agent with user intent when available, and, if the agent produces changes, commits them and uses the same force-push safety guard as the push step
-- On GitHub, GitLab, or Azure DevOps merge conflict: asks the agent to rebase onto the latest default-branch tip and make the smallest correct root-cause fix for the conflicts, using user intent when available
-- If both CI failures and a GitHub, GitLab, or Azure DevOps merge conflict are present: fixes both in the same attempt
-- If a fix attempt produces no changes: automatic mode leaves the failure undeduplicated so it can retry until the auto-fix limit, while manual fix mode returns immediately for manual intervention
-- Deduplicates fix attempts only after a fix is actually committed and pushed
+- Polls the PR at increasing intervals: every 30s for the first 5 minutes, every 60s for 5-15 minutes, every 120s after that
+- Treats `ci_timeout` as an idle timeout for the watch run, exactly as the old CI step did: `ci_timeout: "unlimited"` disables self-termination
 - Exits cleanly when the PR is merged, closed, or declined
-- If the idle timeout is reached while the PR is still open: pauses for user approval, even when CI checks are currently healthy
-- If the idle timeout is reached while CI failures or, on GitHub, GitLab, or Azure DevOps, a merge conflict are still known: pauses for user approval with findings for the remaining issues
-- If the idle timeout is reached while GitHub, GitLab, or Azure DevOps PR mergeability is still unresolved: pauses for user approval with a finding describing the unresolved mergeability state
-- If CI failures or a GitHub, GitLab, or Azure DevOps merge conflict persist after the auto-fix limit: pauses for user approval with findings listing each failing check and/or the merge conflict
+- Waits a 60s grace period before trusting empty check results (CI checks may not have registered yet), and never judges a half-finished CI run: known failures with other checks still pending keep polling
+- A signal the provider could not report is never treated as "fine" - it holds the run open for another poll
+- **Failing CI checks or a merge conflict:** derives a new gate run seeded with the failing checks (see the Fix step), bounded by `auto_fix.ci` fix rounds counted across the run's ancestry. With `auto_fix.ci: 0` it pauses for approval instead
+- **Unresolved comment threads:** pauses for approval with one finding per thread, carrying the author, location, and comment body. Never auto-fixed, whoever opened them
+- **Green but blocked on approval:** pauses for approval with a finding naming the PR and its review state
+- When the driving agent answers a paused watch run with `fix`, the selected findings seed a derived gate run rather than a change made inside the watch run
 
-**Default auto-fix limit:** `3` total CI auto-fix attempts.
+**Default fix-round limit:** `auto_fix.ci` (`3`), counted over the PR's chain of watch and gate runs.
 
 ## Step statuses
 

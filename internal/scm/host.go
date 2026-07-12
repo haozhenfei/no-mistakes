@@ -148,11 +148,59 @@ func (c Check) Failing() bool { return c.Bucket == CheckBucketFail }
 // Pending reports whether the check is still running or queued.
 func (c Check) Pending() bool { return c.Bucket == CheckBucketPending }
 
+// ReviewThread is one comment thread on a PR. It is deliberately
+// provider-agnostic and deliberately says nothing about who opened it: an
+// unresolved thread from a bot, from an automated QA agent, and from a human
+// reviewer are the same signal, and the watch run treats them the same.
+type ReviewThread struct {
+	ID       string
+	Resolved bool
+	Outdated bool // the thread's code has since changed; still unresolved
+	Author   string
+	File     string
+	Line     int
+	Body     string // first comment's text
+}
+
+// ReviewState is the normalized approval status of a PR.
+type ReviewState string
+
+const (
+	// ReviewStateApproved means the PR has the approvals it needs to merge.
+	ReviewStateApproved ReviewState = "APPROVED"
+	// ReviewStatePending means the PR is waiting on a required approval. This
+	// is the state a fully-green PR sits in while it waits for a human, and it
+	// is invisible unless approval is treated as a first-class signal.
+	ReviewStatePending ReviewState = "PENDING"
+	// ReviewStateChangesRequested means a reviewer asked for changes.
+	ReviewStateChangesRequested ReviewState = "CHANGES_REQUESTED"
+	// ReviewStateUnknown means the provider did not report a state.
+	ReviewStateUnknown ReviewState = "UNKNOWN"
+)
+
+// Blocked reports whether the review state, on its own, prevents a merge.
+func (s ReviewState) Blocked() bool {
+	return s == ReviewStatePending || s == ReviewStateChangesRequested
+}
+
+// UnresolvedThreads returns the threads that still need someone's attention.
+func UnresolvedThreads(threads []ReviewThread) []ReviewThread {
+	var out []ReviewThread
+	for _, t := range threads {
+		if !t.Resolved {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // Capabilities declares which optional Host methods return meaningful data.
 // Callers must consult Capabilities before invoking optional methods.
 type Capabilities struct {
 	MergeableState  bool
 	FailedCheckLogs bool
+	ReviewThreads   bool
+	ReviewState     bool
 }
 
 // ErrUnsupported is returned by optional Host methods that the provider
@@ -185,4 +233,12 @@ type Host interface {
 	// FetchFailedCheckLogs is optional; returns "" when no logs can be retrieved
 	// and ErrUnsupported when the provider has no log-fetching support at all.
 	FetchFailedCheckLogs(ctx context.Context, pr *PR, branch, headSHA string, failingNames []string) (string, error)
+
+	// ListReviewThreads is optional; implementations without
+	// Capabilities().ReviewThreads must return ErrUnsupported.
+	ListReviewThreads(ctx context.Context, pr *PR) ([]ReviewThread, error)
+
+	// GetReviewState is optional; implementations without
+	// Capabilities().ReviewState must return ErrUnsupported.
+	GetReviewState(ctx context.Context, pr *PR) (ReviewState, error)
 }
