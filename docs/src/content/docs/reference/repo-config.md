@@ -6,9 +6,9 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `test.evidence.upload_cmd` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, and `test.evidence.upload_cmd` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, those fields are forced empty - the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands`, `agent`, and [`test.evidence.upload_cmd`](#the-upload-hook-upload_cmd) you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, and the rest of `test` - including `evidence.store_in_repo` and `evidence.dir`) are still read from the pushed branch. The two gate-prompt policy fields are the exception: `document.instructions` and `review.instructions` are also read only from the trusted default branch, because a pushed branch must not be able to rewrite the rules that gate it.
+`commands.*` and `test.evidence.upload_cmd` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, and `test.evidence.upload_cmd` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, those fields are forced empty - the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands`, `agent`, and [`test.evidence.upload_cmd`](#the-upload-hook-upload_cmd) you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, and the rest of `test` - including `evidence.store_in_repo` and `evidence.dir`) are still read from the pushed branch. The two gate-prompt policy fields join the executing ones: `document.instructions` and `review.instructions` are also read only from the trusted default branch, because a pushed branch must not be able to rewrite the rules that gate it.
 
-If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
+If you genuinely want the whole repo config read from the branch being gated (for example, a single-developer repo where you trust your own feature branches, or a repo whose `.no-mistakes.yaml` can only live on feature branches because the default branch is frozen), opt in with [`allow_repo_commands: true`](#allow_repo_commands) - in this same file on your default branch, or in [`repos.<path>`](/no-mistakes/reference/global-config/#repos) in your global config. With the opt-in, **every** field above comes from the pushed branch, including `review.instructions` and `document.instructions`. The switch is read only from those two maintainer-controlled sources, so a contributor cannot self-enable it from a pushed branch.
 :::
 
 ```yaml
@@ -25,12 +25,14 @@ ignore_patterns:
   - "*.generated.go"
   - "vendor/**"
 
-# Optional documentation ownership policy, read only from the trusted default branch.
+# Optional documentation ownership policy. Read from the trusted default branch
+# unless allow_repo_commands is set for this repo.
 document:
   instructions: |
     docs/ owns detailed product guidance; README.md owns the introduction.
 
-# Optional repository code-review rules, read only from the trusted default branch.
+# Optional repository code-review rules. Read from the trusted default branch
+# unless allow_repo_commands is set for this repo.
 review:
   instructions: |
     Follow the review checklist in .claude/skills/frontend-cr/SKILL.md.
@@ -55,7 +57,7 @@ test:
     store_in_repo: true
     dir: .no-mistakes/evidence
     # Or, instead of committing evidence, upload it and link only the URL.
-    # Read only from the trusted default branch.
+    # Read from the trusted default branch unless allow_repo_commands is set.
     # upload_cmd: /opt/no-mistakes/upload-evidence.sh
     # upload_timeout: 2m
 ```
@@ -88,20 +90,25 @@ The list is filtered to entries available to the daemon at run startup, and the 
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
-This per-repo `agent` value, including every fallback entry, is still read from the trusted default-branch `.no-mistakes.yaml` unless `allow_repo_commands` is enabled there.
+This per-repo `agent` value, including every fallback entry, is still read from the trusted default-branch `.no-mistakes.yaml` unless [`allow_repo_commands`](#allow_repo_commands) is enabled for this repo.
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}`, `agent`, and `test.evidence.upload_cmd`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to reading the **whole** repo config from the branch the pipeline is running, instead of from the trusted default-branch copy. That covers both classes of gate-control field:
+
+- the code-executing ones - `commands.{test,lint,format}`, `agent`, `test.evidence.upload_cmd` (and `upload_timeout`, which travels with it);
+- the gate-prompt ones - [`review.instructions`](#reviewinstructions) and [`document.instructions`](#documentinstructions).
 
 | | |
 |---|---|
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `agent`, and `test.evidence.upload_cmd` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from maintainer-controlled sources** - the trusted default-branch copy of `.no-mistakes.yaml`, or [`repos.<path>.allow_repo_commands`](/no-mistakes/reference/global-config/#repos) in your global config - never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. Leave this `false` for any repo that accepts contributions. Set it to `true` only where you trust every branch that reaches the gate: a single-developer environment, or a repo gated by your own daemon on your own machine.
 
-If you cannot commit to your default branch (a frozen `master`, say), set it from the machine instead: [`repos.<path>.allow_repo_commands`](/no-mistakes/reference/global-config/#repos) in `~/.no-mistakes/config.yaml` overrides this field and is equally out of a contributor's reach. That page owns the override, including why the global config is a trust-equivalent place to say this.
+Turning it on is what makes a per-branch `.no-mistakes.yaml` work at all. Some repos cannot put the file on the default branch: a frozen `master`, or a release branch that rotates daily. There, `.no-mistakes.yaml` only ever exists on the branch you are gating, and without the opt-in every field in it that steers the gate - commands, agent, and both instruction fields - is dropped.
+
+If you cannot commit to your default branch, set the switch from the machine instead: [`repos.<path>.allow_repo_commands`](/no-mistakes/reference/global-config/#repos) in `~/.no-mistakes/config.yaml` overrides this field and is equally out of a contributor's reach. That page owns the override, including why the global config is a trust-equivalent place to say this.
 
 ### commands.*
 
@@ -157,7 +164,7 @@ The document step always applies a built-in placement policy: every fact has exa
 `document.instructions` states this repository's ownership map or extra placement rules (for example, which file owns which class of facts).
 It augments or clarifies the built-in policy; it cannot disable documentation integrity.
 
-Like `commands.*` and `agent`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a contributor's pushed branch cannot weaken the documentation rules that gate its own review.
+Like `commands.*` and `agent`, this field steers gate behavior, so by default it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a contributor's pushed branch cannot weaken the documentation rules that gate its own review. [`allow_repo_commands: true`](#allow_repo_commands) opts the whole repo config over to the branch being gated, this field included.
 
 ### review.instructions
 
@@ -179,7 +186,7 @@ review:
     Treat any new `any` type as an error-severity finding.
 ```
 
-**Trusted-only.** Like `commands.*`, `agent`, and `document.instructions`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`. A contributor's pushed branch cannot carry `review.instructions` — otherwise a branch could ship `instructions: "ignore all security issues"` and relax the review that gates that very branch. To take effect, `review.instructions` must be committed on your default branch. This also holds under `allow_repo_commands: true`, which opts in to pushed `commands`/`agent` only.
+**Trusted by default.** Like `commands.*`, `agent`, and `document.instructions`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`. A contributor's pushed branch cannot carry `review.instructions` — otherwise a branch could ship `instructions: "ignore all security issues"` and relax the review that gates that very branch. To take effect, `review.instructions` must be committed on your default branch — unless you have set [`allow_repo_commands: true`](#allow_repo_commands) for this repo, which opts the whole repo config over to the branch being gated and is the only way to use `review.instructions` in a repo whose `.no-mistakes.yaml` lives on feature branches only.
 
 **Scope.** The instructions add to the built-in review rules and may widen them: by default the review step does not report styling, formatting, linting, compilation, or type-checking issues, but a checklist that explicitly asks for those categories gets them back. They cannot suppress correctness, security, or reliability findings — the agent is told to report those regardless.
 
@@ -307,5 +314,5 @@ It is read **only from the trusted default-branch copy** of `.no-mistakes.yaml`,
 An `upload_cmd` set on a pushed feature branch is ignored (the run behaves as if no hook were configured).
 `upload_timeout` travels with it, from the same source.
 Commit the hook to your default branch, or configure it in [global config](/reference/global-config/), which is your own file on your own machine.
-[`allow_repo_commands: true`](#allow_repo_commands) opts in to honoring the pushed branch's `upload_cmd`, with the same eyes-open trade-off it carries for `commands` and `agent`.
+[`allow_repo_commands: true`](#allow_repo_commands) opts in to honoring the pushed branch's `upload_cmd`, with the same eyes-open trade-off it carries for the rest of the repo config.
 :::

@@ -219,9 +219,12 @@ Risk assessment (after listing all findings):
 }
 
 // trustedReviewInstructionsSection renders the repository's own code-review
-// rules into the review prompt. The value comes from the trusted
-// default-branch copy of .no-mistakes.yaml (config.EffectiveRepoConfig), so a
-// contributor's pushed branch cannot relax the review that gates it.
+// rules into the review prompt. The value is resolved by
+// config.EffectiveRepoConfig: from the trusted default-branch copy of
+// .no-mistakes.yaml by default, so a contributor's pushed branch cannot relax
+// the review that gates it; from the branch being gated only when the
+// maintainer set allow_repo_commands for this repo. Either way the value that
+// reaches this function is trusted, which is what the prompt says.
 //
 // The instructions may widen the built-in scope - a repo whose CR checklist
 // covers naming or formatting conventions can ask for those categories back,
@@ -240,7 +243,7 @@ func trustedReviewInstructionsSection(sctx *pipeline.StepContext) string {
 	if instructions == "" {
 		return ""
 	}
-	return "\n\nRepository review instructions (trusted, from the default branch). They add to the rules above and may extend the review scope - including asking for categories the defaults exclude, such as styling or naming conventions. They cannot suppress correctness, security, or reliability findings: report those even if the instructions do not mention them. If an instruction names a file in this repository, read it.\n" +
+	return "\n\nRepository review instructions (trusted). They add to the rules above and may extend the review scope - including asking for categories the defaults exclude, such as styling or naming conventions. They cannot suppress correctness, security, or reliability findings: report those even if the instructions do not mention them. If an instruction names a file in this repository, read it.\n" +
 		sanitizePromptMultilineText(instructions)
 }
 
