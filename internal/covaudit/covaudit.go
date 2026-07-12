@@ -10,12 +10,12 @@
 //  2. Load captured, signature-verified coverage evidence — the instrumentation
 //     ground truth. Only verified-captured entries count; a tampered or attested
 //     entry contributes no coverage.
-//  3. Backfill the ledger against that truth: promote executed hunks to
+//  3. Insert placeholder "unverified" rows for changed hunks no gate recorded,
+//     so the ledger is a complete record of the diff (§4.4c a), every changed
+//     hunk surfaces in the dossier, and step 4 judges the whole diff.
+//  4. Backfill the ledger against that truth: promote executed hunks to
 //     runtime-verified, downgrade unsupported runtime-verified labels. Persist
 //     the corrections.
-//  4. Insert placeholder "unverified" rows for changed hunks no gate recorded,
-//     so the ledger is a complete record of the diff (§4.4c a) and every changed
-//     hunk surfaces in the dossier.
 //  5. Run the §4.4c audit and return the report plus the corrected ledger.
 package covaudit
 
@@ -67,21 +67,25 @@ func Run(ctx context.Context, database *db.DB, runID, workDir, keyPath, base, he
 		return Result{}, fmt.Errorf("coverage audit: load ledger: %w", err)
 	}
 
+	// Complete the ledger FIRST: insert placeholder unverified rows for changed
+	// hunks no gate recorded, so the ledger faithfully covers the whole diff
+	// (§4.4c a) — and so the backfill below sees them. Filling after the backfill
+	// made instrumentation truth depend on whether an agent happened to record a
+	// row: a hunk the tests provably executed stayed "unverified" simply because
+	// no gate wrote it down.
+	ledger, err = fillMissingHunks(database, runID, changed, ledger)
+	if err != nil {
+		return Result{}, err
+	}
+
 	// Backfill against instrumentation truth and persist the corrections.
-	backfilled, downgrades := coverage.Backfill(ledger, datasets, coverageIDs)
+	backfilled, downgrades := coverage.Backfill(ledger, datasets, coverageIDs, staticOK)
 	for i := range backfilled {
 		if !ledgerEntryEqual(ledger[i], backfilled[i]) {
 			if err := database.UpdateCoverageEntry(backfilled[i]); err != nil {
 				return Result{}, fmt.Errorf("coverage audit: persist backfill: %w", err)
 			}
 		}
-	}
-
-	// Complete the ledger: insert placeholder unverified rows for changed hunks
-	// no gate recorded, so the ledger faithfully covers the whole diff.
-	backfilled, err = fillMissingHunks(database, runID, changed, backfilled)
-	if err != nil {
-		return Result{}, err
 	}
 
 	report := coverage.Audit(changed, backfilled, datasets, staticOK)

@@ -18,7 +18,7 @@ func TestBackfill_DowngradesFalseRuntimeClaim(t *testing.T) {
 	}
 	datasets := []CoverageData{goCov("github.com/org/repo/foo.go", LineRange{10, 12})}
 
-	out, downgrades := Backfill(ledger, datasets, []string{"ev-cov1"})
+	out, downgrades := Backfill(ledger, datasets, []string{"ev-cov1"}, nil)
 
 	if out[0].State != StateRuntimeVerified {
 		t.Errorf("covered hunk state = %q, want runtime-verified", out[0].State)
@@ -48,7 +48,7 @@ func TestBackfill_PromotesCoveredHunk(t *testing.T) {
 	}
 	datasets := []CoverageData{goCov("foo.go", LineRange{11, 11})}
 
-	out, downgrades := Backfill(ledger, datasets, []string{"ev-cov"})
+	out, downgrades := Backfill(ledger, datasets, []string{"ev-cov"}, nil)
 	if out[0].State != StateRuntimeVerified {
 		t.Errorf("state = %q, want runtime-verified", out[0].State)
 	}
@@ -64,10 +64,12 @@ func TestBackfill_DowngradeToStaticWhenEvidencePresent(t *testing.T) {
 	ledger := []LedgerEntry{
 		{File: "foo.go", StartLine: 10, EndLine: 12, State: StateRuntimeVerified, Evidence: []string{"ev-typecheck"}},
 	}
-	// No instrumentation covers it.
-	out, downgrades := Backfill(ledger, nil, nil)
+	// No instrumentation covers it, but the cited evidence is captured
+	// executable static evidence, so the downgrade lands on static-verified.
+	staticOK := func(id string) bool { return id == "ev-typecheck" }
+	out, downgrades := Backfill(ledger, nil, nil, staticOK)
 	if out[0].State != StateStaticVerified {
-		t.Errorf("state = %q, want static-verified (has evidence)", out[0].State)
+		t.Errorf("state = %q, want static-verified (has executable static evidence)", out[0].State)
 	}
 	if len(downgrades) != 1 || downgrades[0].To != StateStaticVerified {
 		t.Errorf("downgrade = %+v, want →static-verified", downgrades)
@@ -79,7 +81,7 @@ func TestBackfill_LeavesNonRuntimeUncoveredAlone(t *testing.T) {
 		{File: "foo.go", StartLine: 10, EndLine: 12, State: StateStaticVerified, Evidence: []string{"ev-1"}},
 		{File: "foo.go", StartLine: 20, EndLine: 22, State: StateUnverified, Reason: "config only"},
 	}
-	out, downgrades := Backfill(ledger, nil, nil)
+	out, downgrades := Backfill(ledger, nil, nil, nil)
 	if out[0].State != StateStaticVerified || out[1].State != StateUnverified {
 		t.Errorf("non-runtime uncovered entries changed: %+v", out)
 	}
@@ -214,7 +216,7 @@ github.com/org/repo/calc.go:8.10,9.2 1 0
 		{File: changed[0].File, StartLine: changed[0].Start, EndLine: changed[0].End, State: StateRuntimeVerified},
 		{File: changed[1].File, StartLine: changed[1].Start, EndLine: changed[1].End, State: StateRuntimeVerified},
 	}
-	backfilled, downgrades := Backfill(ledger, []CoverageData{cov}, []string{"ev-cov"})
+	backfilled, downgrades := Backfill(ledger, []CoverageData{cov}, []string{"ev-cov"}, nil)
 	if len(downgrades) != 1 {
 		t.Fatalf("expected 1 downgrade (the uncovered subtraction hunk), got %+v", downgrades)
 	}
@@ -240,4 +242,26 @@ func countIssues(rep AuditReport, kind string) int {
 		}
 	}
 	return n
+}
+
+// TestBackfill_DowngradeToAttestedWhenEvidenceIsNotExecutableStatic pins half of
+// the "same hunk, three runs, three states" instability seen on coze 6951: the
+// downgrade target used to be "does the entry cite any evidence at all", so an
+// attested screenshot made a falsely-runtime-verified hunk land on
+// static-verified in one run while the next run's agent labelled the same hunk
+// attested. The downgrade now applies the same executable-static-evidence test
+// the audit does.
+func TestBackfill_DowngradeToAttestedWhenEvidenceIsNotExecutableStatic(t *testing.T) {
+	ledger := []LedgerEntry{
+		{File: "row.tsx", StartLine: 10, EndLine: 12, State: StateRuntimeVerified, Evidence: []string{"ev-screenshot"}},
+	}
+	// The screenshot is attested evidence, not a captured typecheck/AST run.
+	staticOK := func(string) bool { return false }
+	out, downgrades := Backfill(ledger, nil, nil, staticOK)
+	if out[0].State != StateAttested {
+		t.Errorf("state = %q, want attested (a screenshot is not executable static evidence)", out[0].State)
+	}
+	if len(downgrades) != 1 || downgrades[0].To != StateAttested {
+		t.Errorf("downgrade = %+v, want →attested", downgrades)
+	}
 }

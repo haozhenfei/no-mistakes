@@ -56,7 +56,15 @@ type Downgrade struct {
 // coverageEvidenceIDs maps each CoverageData to the evidence ID it came from,
 // parallel to datasets, so attached evidence is traceable. A nil/short slice
 // just yields no attached IDs.
-func Backfill(entries []LedgerEntry, datasets []CoverageData, coverageEvidenceIDs []string) ([]LedgerEntry, []Downgrade) {
+//
+// staticOK is the SAME executable-static-evidence test the audit applies
+// (§4.4c c) and decides where a downgrade lands. It used to be "the entry has
+// any evidence at all", which let an attested screenshot masquerade as static
+// evidence: the identical hunk landed on static-verified in one run and on
+// attested in the next, purely from which evidence IDs the agent happened to
+// cite. A nil staticOK keeps the old permissive behavior for callers that have
+// no evidence index.
+func Backfill(entries []LedgerEntry, datasets []CoverageData, coverageEvidenceIDs []string, staticOK StaticEvidenceChecker) ([]LedgerEntry, []Downgrade) {
 	out := make([]LedgerEntry, len(entries))
 	copy(out, entries)
 	var downgrades []Downgrade
@@ -73,7 +81,7 @@ func Backfill(entries []LedgerEntry, datasets []CoverageData, coverageEvidenceID
 			e.Source = "backfill"
 		case e.State == StateRuntimeVerified:
 			to := StateAttested
-			if hasStaticEvidence(*e) {
+			if staticEvidenceOK(*e, staticOK) {
 				to = StateStaticVerified
 			}
 			reason := "claimed runtime-verified but no captured instrumentation coverage intersects this hunk"
@@ -102,14 +110,6 @@ func coveringEvidence(h Hunk, datasets []CoverageData, ids []string) (bool, []st
 		}
 	}
 	return covered, hits
-}
-
-// hasStaticEvidence is a placeholder for "the entry carries evidence that could
-// justify a static-verified state". Backfill cannot itself judge static evidence
-// quality (that is the audit's job, §4.4c c); it only preserves a static state
-// when evidence exists rather than dropping straight to attested.
-func hasStaticEvidence(e LedgerEntry) bool {
-	return len(e.Evidence) > 0
 }
 
 func mergeEvidence(existing, add []string) []string {

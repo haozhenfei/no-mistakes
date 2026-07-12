@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/claims"
 	"github.com/kunchenguid/no-mistakes/internal/covaudit"
+	"github.com/kunchenguid/no-mistakes/internal/coverage"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -36,8 +37,12 @@ import (
 // Coverage audit (§4.4c) also runs here (see runCoverageAudit): the coverage
 // ledger is backfilled from captured instrumentation and machine-checked for
 // completeness / runtime-truth / static rigor. Its issues surface as findings
-// but do not themselves park the run — parking stays driven by REFUTED claims;
-// coverage results are a data source for §6 risk routing (not built here).
+// and do not park the run by themselves — with ONE exception that is a gate, not
+// an audit note: a behavior-class claim must be backed by a runtime-verified
+// hunk (see coverage.UnbackedBehaviorClaims). "attested" is the ledger honestly
+// reporting that nothing executed the changed code, so it cannot support a claim
+// about what a user observes; such a claim is capped at PLAUSIBLE and parks.
+// Coverage results are also a data source for §6 risk routing (not built here).
 // Spot-check reproduction (§4.4b) remains deferred.
 type VerifyStep struct{}
 
@@ -93,7 +98,7 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		byID[e.ID] = e
 	}
 
-	targets, err := s.gatherTargets(sctx, byID)
+	targets, claimList, err := s.gatherTargets(sctx, byID)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +113,16 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		skeptics = sctx.Config.Verify.Skeptics
 	}
 
+	// The coverage audit runs BEFORE adjudication because its (backfilled)
+	// ledger decides whether a behavior-class claim has any runtime evidence at
+	// all. A claim with none can never be recorded as CONFIRMED below.
+	coverageFindings, coverageSummary, ledger := s.runCoverageAudit(sctx)
+	gaps := coverage.UnbackedBehaviorClaims(claimList, ledger)
+	gapByClaim := make(map[string]coverage.BehaviorGap, len(gaps))
+	for _, g := range gaps {
+		gapByClaim[g.ClaimID] = g
+	}
+
 	var findings []Finding
 	var refuted, plausible, confirmed int
 	for _, target := range targets {
@@ -119,6 +134,16 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			// infrastructure failure into an optimistic verdict that lets the
 			// pipeline through. See runSkeptic.
 			return nil, fmt.Errorf("verification did not run: %w", err)
+		}
+		// A behavior claim with no runtime-verified hunk behind it cannot be a
+		// CONFIRMED runtime pass, whatever the skeptic thought: the skeptic
+		// judges the prose evidence it was shown, and the ledger is the machine
+		// fact about whether the changed code ever ran. Cap the verdict rather
+		// than overwrite it, so a REFUTED or PLAUSIBLE verdict keeps its
+		// (stronger or equal) meaning.
+		if gap, ok := gapByClaim[target.claimID]; ok && verdict == claims.VerdictConfirmed {
+			verdict = claims.VerdictPlausible
+			rationale = fmt.Sprintf("capped to PLAUSIBLE — no runtime evidence: %s (skeptic said: %s)", gap.Detail, rationale)
 		}
 		s.record(sctx, target, verdict, rationale, votes)
 
@@ -142,16 +167,31 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		}
 	}
 
-	// Coverage audit (§4.4c): backfill the ledger from captured instrumentation
-	// and machine-check completeness / runtime-truth / static rigor. It is
-	// observability + a data source for §6 routing (not built here), so its
-	// issues surface as findings but do not themselves park the run — parking
-	// stays driven by REFUTED claims. Best-effort: a failure logs and is skipped.
-	coverageFindings, coverageSummary := s.runCoverageAudit(sctx)
+	// A behavior claim with no runtime evidence is a gate failure, not a note.
+	// "attested" is the ledger honestly saying "an agent asserted this, nothing
+	// executed it"; leaving that as an acceptable terminal state is how a
+	// synthetic render page of a code branch the user can never reach got
+	// registered as a fixed, user-visible regression (coze MR 6951) while the run
+	// reported completed. It parks for a decision and is NOT auto-fixable: the
+	// honest remedies are to capture real instrumentation coverage or to restate
+	// the claim, and letting the fixer agent choose means letting it delete the
+	// claim that is failing the gate.
+	for _, g := range gaps {
+		findings = append(findings, Finding{
+			Severity: "error",
+			Action:   types.ActionAskUser,
+			Description: fmt.Sprintf("NO RUNTIME EVIDENCE for %s claim %q — %s. Capture instrumentation that executes the changed code (`no-mistakes evidence coverage --profile <file> --format go|lcov`) and re-run, or restate the claim so it does not assert a runtime pass.",
+				g.Kind, g.Text, g.Detail),
+		})
+	}
+
 	findings = append(findings, coverageFindings...)
 
-	needsApproval := refuted > 0
+	needsApproval := refuted > 0 || len(gaps) > 0
 	summary := fmt.Sprintf("verify: %d confirmed, %d plausible, %d refuted across %d claim(s)/finding(s)", confirmed, plausible, refuted, len(targets))
+	if len(gaps) > 0 {
+		summary += fmt.Sprintf("; %d behavior claim(s) with no runtime evidence", len(gaps))
+	}
 	if coverageSummary != "" {
 		summary += "; " + coverageSummary
 	}
@@ -160,18 +200,23 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	findingsJSON, _ := json.Marshal(Findings{Items: findings, Summary: summary})
 	return &pipeline.StepOutcome{
 		NeedsApproval: needsApproval,
-		AutoFixable:   needsApproval,
+		AutoFixable:   refuted > 0 && len(gaps) == 0,
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
 	}, nil
 }
 
 // runCoverageAudit runs the coverage backfill + audit for the run and turns the
-// report into non-parking findings. Returns the findings and a one-line summary
-// (empty when coverage could not be evaluated).
-func (s *VerifyStep) runCoverageAudit(sctx *pipeline.StepContext) ([]Finding, string) {
+// report into non-parking findings. Returns the findings, a one-line summary
+// (empty when coverage could not be evaluated), and the backfilled ledger the
+// behavior-claim runtime-backing check reads.
+//
+// The ledger is nil whenever the audit did not produce one (no DB, or the audit
+// failed), which leaves every behavior claim unbacked. That is deliberate: an
+// audit that could not run has not found the change runtime-verified.
+func (s *VerifyStep) runCoverageAudit(sctx *pipeline.StepContext) ([]Finding, string, []coverage.LedgerEntry) {
 	if sctx.DB == nil || sctx.Paths == nil || sctx.Run == nil {
-		return nil, ""
+		return nil, "", nil
 	}
 	// Run.BaseSHA is the post-receive hook's "old" SHA, which is all-zero for
 	// the first push of a branch; handing that to `git diff` yields "Invalid
@@ -194,10 +239,10 @@ func (s *VerifyStep) runCoverageAudit(sctx *pipeline.StepContext) ([]Finding, st
 			Severity:    "warning",
 			Action:      types.ActionNoOp,
 			Description: fmt.Sprintf("coverage audit did not run — code coverage was NOT evaluated for this change: %v", err),
-		}}, "coverage audit did not run"
+		}}, "coverage audit did not run", nil
 	}
 	if res.Report.TotalHunks == 0 {
-		return nil, ""
+		return nil, "", res.Ledger
 	}
 	var findings []Finding
 	for _, dg := range res.Downgrades {
@@ -214,7 +259,7 @@ func (s *VerifyStep) runCoverageAudit(sctx *pipeline.StepContext) ([]Finding, st
 			Description: fmt.Sprintf("coverage audit [%s]: %s:%d-%d — %s", is.Kind, is.Hunk.File, is.Hunk.Start, is.Hunk.End, is.Detail),
 		})
 	}
-	return findings, res.Report.String()
+	return findings, res.Report.String(), res.Ledger
 }
 
 // adjudicate runs the skeptics and returns the majority verdict, a combined
@@ -318,14 +363,18 @@ func (s *VerifyStep) record(sctx *pipeline.StepContext, target verifyTarget, ver
 
 // gatherTargets builds the list of things to adjudicate: evidence-bound claims
 // (self-attested claims are excluded — they can never be conclusions, so there
-// is nothing to refute) plus semantic findings from the review step.
-func (s *VerifyStep) gatherTargets(sctx *pipeline.StepContext, byID map[string]evidence.LoadedEntry) ([]verifyTarget, error) {
+// is nothing to refute) plus semantic findings from the review step. It also
+// returns the run's claims, which the runtime-backing check needs for their kind
+// and hunks (a verifyTarget deliberately carries neither).
+func (s *VerifyStep) gatherTargets(sctx *pipeline.StepContext, byID map[string]evidence.LoadedEntry) ([]verifyTarget, []claims.Claim, error) {
 	var targets []verifyTarget
+	var claimList []claims.Claim
 
 	if sctx.DB != nil {
-		claimList, err := sctx.DB.GetClaimsByRun(sctx.Run.ID)
+		var err error
+		claimList, err = sctx.DB.GetClaimsByRun(sctx.Run.ID)
 		if err != nil {
-			return nil, fmt.Errorf("load claims: %w", err)
+			return nil, nil, fmt.Errorf("load claims: %w", err)
 		}
 		for _, c := range claimList {
 			if c.SelfAttested() {
@@ -342,7 +391,7 @@ func (s *VerifyStep) gatherTargets(sctx *pipeline.StepContext, byID map[string]e
 	}
 
 	targets = append(targets, s.semanticFindingTargets(sctx)...)
-	return targets, nil
+	return targets, claimList, nil
 }
 
 // semanticFindingTargets pulls actionable review findings so the verify gate

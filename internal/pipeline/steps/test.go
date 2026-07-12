@@ -42,6 +42,7 @@ const coverageLedgerGuidance = `- Triage reachability before you record any resu
   - Use static-verified only for captured executable static evidence such as typecheck or AST/tool output.
   - Use attested for agent judgement or prose-only support, and unverified with a reason when you could not execute or assess the hunk.
 - A runtime pass MUST have captured evidence IDs and corresponding coverage-ledger support. Code-level reasoning alone MUST NOT count as a runtime pass.
+- This is enforced, not advisory: the verify gate refuses to confirm a behavior or regression-fixed claim unless a runtime-verified hunk backs it (name the hunks it covers with ` + "`--hunks <file>:<start>-<end>`" + `), and parks the run when none does. If you cannot capture instrumentation that executes the changed code, say so plainly — register the claim for what you actually established instead of asserting a runtime pass.
 - Persist all of this through the existing findings, claims, evidence, and coverage-ledger surfaces. Do not create a parallel datastore, and do not implement or simulate green/yellow/red risk routing.`
 
 // TestStep runs baseline tests, gathers evidence for user intent, and optionally asks the agent to fix failures.
