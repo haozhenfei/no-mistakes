@@ -567,3 +567,15 @@ func extractMRURL(raw []byte) string {
 	}
 	return ""
 }
+
+// ListReviewThreads and GetReviewState are not wired for GitLab yet. Both
+// degrade to ErrUnsupported (and Capabilities reports false), so a watch run on
+// a GitLab MR still converges on CI and mergeability and simply cannot see
+// discussion threads or approval - it never guesses that there are none.
+func (h *Host) ListReviewThreads(_ context.Context, _ *scm.PR) ([]scm.ReviewThread, error) {
+	return nil, scm.ErrUnsupported
+}
+
+func (h *Host) GetReviewState(_ context.Context, _ *scm.PR) (scm.ReviewState, error) {
+	return "", scm.ErrUnsupported
+}

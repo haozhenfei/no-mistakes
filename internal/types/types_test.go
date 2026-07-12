@@ -5,17 +5,35 @@ import (
 	"testing"
 )
 
-func TestAllStepsOrder(t *testing.T) {
-	steps := AllSteps()
-	if len(steps) != 10 {
-		t.Fatalf("expected 10 steps, got %d", len(steps))
+func TestGateStepsOrder(t *testing.T) {
+	steps := GateSteps()
+	expected := []StepName{StepIntent, StepRebase, StepFix, StepReview, StepTest, StepVerify, StepDocument, StepLint, StepPush, StepPR}
+	if len(steps) != len(expected) {
+		t.Fatalf("expected %d gate steps, got %d", len(expected), len(steps))
 	}
-
-	expected := []StepName{StepIntent, StepRebase, StepReview, StepTest, StepVerify, StepDocument, StepLint, StepPush, StepPR, StepCI}
 	for i, s := range steps {
 		if s != expected[i] {
 			t.Errorf("step[%d] = %q, want %q", i, s, expected[i])
 		}
+	}
+	// The gate pipeline ends at the PR: post-PR monitoring is a watch run.
+	for _, s := range steps {
+		if s == StepCI || s == StepWatch {
+			t.Fatalf("gate pipeline must not contain %q", s)
+		}
+	}
+}
+
+func TestStepsForKind(t *testing.T) {
+	if got := StepsForKind(RunKindWatch); len(got) != 1 || got[0] != StepWatch {
+		t.Fatalf("StepsForKind(watch) = %v, want [watch]", got)
+	}
+	if got := StepsForKind(RunKindGate); len(got) != len(GateSteps()) {
+		t.Fatalf("StepsForKind(gate) = %v, want the gate sequence", got)
+	}
+	// An empty kind (a row written before the split) is a gate run.
+	if got := StepsForKind(""); len(got) != len(GateSteps()) {
+		t.Fatalf("StepsForKind(\"\") = %v, want the gate sequence", got)
 	}
 }
 
@@ -26,14 +44,15 @@ func TestStepNameOrder(t *testing.T) {
 	}{
 		{StepIntent, 1},
 		{StepRebase, 2},
-		{StepReview, 3},
-		{StepTest, 4},
-		{StepVerify, 5},
-		{StepDocument, 6},
-		{StepLint, 7},
-		{StepPush, 8},
-		{StepPR, 9},
-		{StepCI, 10},
+		{StepFix, 3},
+		{StepReview, 4},
+		{StepTest, 5},
+		{StepVerify, 6},
+		{StepDocument, 7},
+		{StepLint, 8},
+		{StepPush, 9},
+		{StepPR, 10},
+		{StepWatch, 1},
 		{StepName("qa"), 0},
 		{StepName("unknown"), 0},
 	}

@@ -258,6 +258,20 @@ func fakeCIGHHandler(args []string) {
 		fmt.Println(state)
 		os.Exit(0)
 	}
+	// The watch step's two extra signals. An unset review decision is what a
+	// repo with no required review returns, and the host maps it to APPROVED.
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json reviewDecision") {
+		fmt.Printf("{\"reviewDecision\":%q}\n", os.Getenv("FAKE_CLI_REVIEW"))
+		os.Exit(0)
+	}
+	if strings.Contains(joined, "api graphql") {
+		nodes := os.Getenv("FAKE_CLI_THREADS")
+		if nodes == "" {
+			nodes = "[]"
+		}
+		fmt.Printf(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":%s}}}}}`+"\n", nodes)
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr checks") {
 		if checksErr != "" {
 			fmt.Fprintln(os.Stderr, checksErr)

@@ -230,9 +230,9 @@ Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requ
 - A GitLab, Bitbucket, or Azure DevOps repo record has a fork URL set; fork MR/PR routing is currently GitHub-only
 - You pushed the default branch (PR step always skips on the default branch)
 
-## CI step stuck or timed out
+## Watch run stuck or timed out
 
-Symptom: CI step keeps monitoring an open PR longer than expected, or pauses after the idle timeout.
+Symptom: a [watch run](/no-mistakes/concepts/pipeline/#watch-runs) keeps monitoring an open PR longer than expected, or pauses after the idle timeout.
 
 Monitoring while the PR remains open - even after checks are currently healthy - is intended behavior, because a later default-branch update can make the PR conflict or rerun CI.
 Once checks are green and the PR is mergeable, the CI panel shows `✓ Checks passed` and the terminal title switches to `Checks passed`, so you can tell when to go merge the PR; the signal clears automatically if checks start re-running or a new failure appears.

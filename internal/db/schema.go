@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS runs (
     head_sha             TEXT NOT NULL,
     base_sha             TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'pending',
+    kind                 TEXT NOT NULL DEFAULT 'gate',
+    parent_run_id        TEXT,
     pr_url               TEXT,
     error                TEXT,
     awaiting_agent_since INTEGER,
@@ -157,6 +159,11 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN awaiting_agent_since INTEGER`,
 	`ALTER TABLE runs ADD COLUMN parked_ms INTEGER`,
 	`ALTER TABLE runs ADD COLUMN skip_steps TEXT`,
+	// Every row written before the gate/watch split is a gate run: the
+	// pre-split pipeline had no other kind. The NOT NULL DEFAULT backfills
+	// them in place, so an existing database keeps loading unchanged.
+	`ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'gate'`,
+	`ALTER TABLE runs ADD COLUMN parent_run_id TEXT`,
 	`ALTER TABLE step_results ADD COLUMN last_activity_at INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,

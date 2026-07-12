@@ -99,6 +99,10 @@ func stepLabel(name types.StepName) string {
 		return "Push"
 	case types.StepPR:
 		return "PR"
+	case types.StepFix:
+		return "Fix"
+	case types.StepWatch:
+		return "Watch"
 	case types.StepCI:
 		return "CI"
 	default:

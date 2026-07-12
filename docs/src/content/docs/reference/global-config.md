@@ -212,7 +212,7 @@ For Codex, `service_tier` and `model_reasoning_effort` tune different things: `s
 
 ### ci_timeout
 
-How long the CI step monitors an open PR, including provider CI status and on GitHub, GitLab, or Azure DevOps PR mergeability, before giving up.
+How long a [watch run](/no-mistakes/concepts/pipeline/#watch-runs) monitors an open PR, including provider CI status and on GitHub, GitLab, or Azure DevOps PR mergeability, before giving up. (It applied to the pre-split blocking CI step, and the key keeps its name.)
 
 |         |                                                 |
 | ------- | ----------------------------------------------- |

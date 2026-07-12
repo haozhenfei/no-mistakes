@@ -121,7 +121,9 @@ var reviewFindingsSchema = json.RawMessage(`{
 	"required": ["findings", "risk_level", "risk_rationale"]
 }`)
 
-// AllSteps returns the fixed pipeline step sequence.
+// AllSteps returns the gate pipeline: everything up to and including the PR.
+// Post-PR monitoring is a watch run's job (see WatchSteps), so this sequence no
+// longer ends in a blocking CI poll that holds the worktree for days.
 // When NM_DEMO=1, it returns mock steps for demo recordings.
 func AllSteps() []pipeline.Step {
 	if IsDemoMode() {
@@ -130,6 +132,7 @@ func AllSteps() []pipeline.Step {
 	return []pipeline.Step{
 		&IntentStep{},
 		&RebaseStep{},
+		&FixStep{},
 		&ReviewStep{},
 		&TestStep{},
 		&VerifyStep{},
@@ -137,6 +140,19 @@ func AllSteps() []pipeline.Step {
 		&LintStep{},
 		&PushStep{},
 		&PRStep{},
-		&CIStep{},
 	}
+}
+
+// WatchSteps returns the watch pipeline: one poller over the PR the gate run
+// opened. It owns no worktree and no local state.
+func WatchSteps() []pipeline.Step {
+	return []pipeline.Step{&WatchStep{}}
+}
+
+// StepsForKind returns the step sequence a run of the given kind executes.
+func StepsForKind(kind types.RunKind) []pipeline.Step {
+	if kind.Watch() {
+		return WatchSteps()
+	}
+	return AllSteps()
 }

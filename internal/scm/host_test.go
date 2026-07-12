@@ -130,3 +130,37 @@ func (fakeHost) GetMergeableState(context.Context, *PR) (MergeableState, error) 
 func (fakeHost) FetchFailedCheckLogs(context.Context, *PR, string, string, []string) (string, error) {
 	return "", ErrUnsupported
 }
+
+func (fakeHost) ListReviewThreads(context.Context, *PR) ([]ReviewThread, error) {
+	return nil, ErrUnsupported
+}
+func (fakeHost) GetReviewState(context.Context, *PR) (ReviewState, error) {
+	return "", ErrUnsupported
+}
+
+func TestUnresolvedThreads(t *testing.T) {
+	t.Parallel()
+	threads := []ReviewThread{
+		{ID: "a", Resolved: true},
+		{ID: "b"},
+		{ID: "c", Resolved: false, Outdated: true},
+	}
+	got := UnresolvedThreads(threads)
+	if len(got) != 2 || got[0].ID != "b" || got[1].ID != "c" {
+		t.Fatalf("UnresolvedThreads() = %+v, want b and c", got)
+	}
+}
+
+func TestReviewStateBlocked(t *testing.T) {
+	t.Parallel()
+	for state, want := range map[ReviewState]bool{
+		ReviewStateApproved:         false,
+		ReviewStateUnknown:          false,
+		ReviewStatePending:          true,
+		ReviewStateChangesRequested: true,
+	} {
+		if got := state.Blocked(); got != want {
+			t.Errorf("%s.Blocked() = %v, want %v", state, got, want)
+		}
+	}
+}

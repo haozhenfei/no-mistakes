@@ -200,13 +200,15 @@ Run the pipeline and decide on its findings as they come up:
       awaiting approval. You rarely need this; omit it to answer the active gate.
 3. Repeat step 2 until the output has an ` + "`outcome:`" + ` instead of a ` + "`gate:`" + `. The
    outcomes are:
-   - ` + "`checks-passed`" + ` - the change is validated and CI is green, but the PR is
-     not merged yet. **You are done driving the pipeline.** Do not wait for the
-     merge: tell the user the PR is ready and ask them to review and merge it
-     (the PR link is in the ` + "`help`" + ` line). no-mistakes keeps monitoring the PR
-     in the background until it is merged, closed, or its configured idle
-     timeout elapses, so a human can watch it in the TUI.
-   - ` + "`passed`" + ` - the changes cleared the gate and the PR was merged or closed.
+   - ` + "`passed`" + ` - the changes cleared the gate. If the ` + "`help`" + ` line carries a
+     PR link, the PR is open and a watch run has taken it over. **You are done
+     driving the pipeline.** Do not wait for CI and do not wait for the merge:
+     tell the user the PR is ready and ask them to review and merge it.
+     no-mistakes keeps monitoring that PR in the background - its CI checks, its
+     unresolved comment threads, and its approval state - until it is merged,
+     closed, or its configured idle timeout elapses.
+   - ` + "`checks-passed`" + ` - the same successful stopping point, reported by a run
+     that is itself the PR monitor. Treat it exactly like ` + "`passed`" + ` with a PR.
    - ` + "`failed`" + ` or ` + "`cancelled`" + ` - they did not; read the output and address it.
      Fix whatever the output points at (a failing test, a lint error, a finding
      you skipped), commit the fix on the same feature branch, then drive the
@@ -226,23 +228,29 @@ Never abort-and-restart, reset the branch, or open a new branch in a way that dr
 re-validates the branch's current state, so those commits stay on the branch
 and already-resolved findings do not re-surface.
 
-The CI step deliberately keeps watching the PR after checks pass, so
-` + "`axi run`" + ` returns ` + "`checks-passed`" + ` the moment checks are green rather than
-blocking on the human merge. Never poll or re-run waiting for the merge yourself.
+The pipeline you drive ends at the PR. Everything after it - CI checks,
+unresolved comment threads, approval - belongs to a **watch run** that
+no-mistakes starts automatically the moment the PR exists, and that holds no
+worktree. So ` + "`axi run`" + ` returns as soon as the PR is up, rather than blocking on
+CI or on the human merge. Never poll or re-run waiting for either yourself.
 
-Because that monitor stays live, a PR that falls behind the default branch or
-hits a merge conflict after checks pass - commonly because another PR merged
-first - needs **no command from you**: never hand-rebase. When the CI monitor
-sees an actual conflict it **rebases onto the base, resolves it, and re-pushes
-the branch itself**; a PR that is merely behind but still clean needs nothing
-either, since the platform merges it. The one exception is when that monitor is
-no longer running - the PR was closed, the run was aborted or superseded, it
-idle-timed-out, or its auto-fix attempts were exhausted - in which case recover
-with ` + "`no-mistakes rerun`" + `, which cancels the stale monitor and re-runs the full
-pipeline including a deterministic rebase step. Do **not** reach for
-` + "`no-mistakes axi run`" + ` to refresh a still-active PR: after ` + "`checks-passed`" + ` it
-reattaches to the running monitor (HEAD unchanged) and returns its output
-without rebasing.
+Because that watch run stays live, a PR that falls behind the default branch,
+hits a merge conflict, or fails CI after you are done - commonly because another
+PR merged first - needs **no command from you**: never hand-rebase. The watch run
+derives a fresh gate run that **rebases onto the base, fixes the problem, and
+re-pushes the branch itself**, and that fix crosses review, test, and lint on the
+way back to the PR; a PR that is merely behind but still clean needs nothing
+either, since the platform merges it. The one exception is when nothing is
+watching the PR any more - it was closed, the run was aborted or superseded, it
+idle-timed-out, or its fix budget was exhausted - in which case recover with
+` + "`no-mistakes rerun`" + `, which re-runs the full pipeline including a deterministic
+rebase step. Do **not** reach for ` + "`no-mistakes axi run`" + ` to refresh a
+still-watched PR.
+
+Unresolved comment threads on the PR - from a human reviewer, a review bot, or an
+automated QA agent alike - and a PR that is green but waiting on someone's
+approval are **escalations, not auto-fixes**: the watch run parks and asks, it
+never rewrites code in answer to a comment on its own.
 
 On a successful outcome (` + "`checks-passed`" + ` or ` + "`passed`" + `), close the loop with the
 user: summarize what happened during the pipeline in a concise, easily readable

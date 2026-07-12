@@ -10,10 +10,16 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// isCIActive returns true if the CI step is currently running.
+// isMonitorStep reports whether a step is the run's PR monitor: the watch step
+// of a watch run, or the ci step of a run recorded before the gate/watch split.
+func isMonitorStep(name types.StepName) bool {
+	return name == types.StepWatch || name == types.StepCI
+}
+
+// isCIActive returns true if the run's PR monitor is currently running.
 func isCIActive(steps []ipc.StepResultInfo) bool {
 	for _, s := range steps {
-		if s.StepName == types.StepCI {
+		if isMonitorStep(s.StepName) {
 			switch s.Status {
 			case types.StepStatusRunning:
 				return true
@@ -23,10 +29,10 @@ func isCIActive(steps []ipc.StepResultInfo) bool {
 	return false
 }
 
-// ciStepStatus returns the current status of the CI step.
+// ciStepStatus returns the current status of the run's PR monitor.
 func ciStepStatus(steps []ipc.StepResultInfo) types.StepStatus {
 	for _, s := range steps {
-		if s.StepName == types.StepCI {
+		if isMonitorStep(s.StepName) {
 			return s.Status
 		}
 	}

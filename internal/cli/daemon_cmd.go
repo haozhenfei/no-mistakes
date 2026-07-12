@@ -187,7 +187,7 @@ func formatSkipPushOptions(steps []types.StepName) []string {
 }
 
 func validStep(step types.StepName) bool {
-	for _, known := range types.AllSteps() {
+	for _, known := range types.KnownSteps() {
 		if step == known {
 			return true
 		}

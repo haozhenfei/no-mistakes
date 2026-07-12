@@ -201,6 +201,18 @@ func (d *DB) ResetStepForResume(id string) error {
 	return nil
 }
 
+// DeleteStepsForRun removes every step_results row for a run (and, by cascade,
+// their rounds). Only a watch run may use this: it holds no local state, so
+// re-arming it after a crash means re-deriving the whole verdict from the live
+// PR, and the half-written rows of the dead poll would otherwise duplicate
+// against the fresh ones the re-armed run inserts.
+func (d *DB) DeleteStepsForRun(runID string) error {
+	if _, err := d.sql.Exec(`DELETE FROM step_results WHERE run_id = ?`, runID); err != nil {
+		return fmt.Errorf("delete steps for run: %w", err)
+	}
+	return nil
+}
+
 // TouchStepActivity records the latest meaningful activity for an active step
 // without changing its status or current agent pid.
 func (d *DB) TouchStepActivity(id string, text string) error {

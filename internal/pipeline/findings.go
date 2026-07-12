@@ -321,3 +321,12 @@ func filterFindingsJSON(raw string, ids []string) string {
 	}
 	return filteredRaw
 }
+
+// SelectFindingsJSON narrows a step's findings to the ones the driving agent
+// selected and merges in its instructions and any findings it authored itself.
+// It is the same selection the executor performs for an in-run fix round,
+// exported for the one fix round that happens across runs: a `fix` answer to a
+// parked watch run seeds a derived gate run rather than a step re-execution.
+func SelectFindingsJSON(raw string, ids []string, instructions map[string]string, added []types.Finding) string {
+	return mergeUserOverridesJSON(filterFindingsJSON(raw, ids), instructions, added)
+}

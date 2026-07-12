@@ -101,16 +101,35 @@ func runGhForkPRStub(args []string) int {
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
 		if hasArgValue(args, "--json", "state") {
-			fmt.Println("MERGED")
+			state := os.Getenv("FAKEAGENT_GH_PR_STATE")
+			if state == "" {
+				state = "MERGED"
+			}
+			fmt.Println(state)
 			return 0
 		}
 		if hasArgValue(args, "--json", "mergeable") {
 			fmt.Println("MERGEABLE")
 			return 0
 		}
+		// The watch run's approval signal. An empty decision is what a repo
+		// with no required review returns.
+		if hasArgValue(args, "--json", "reviewDecision") {
+			fmt.Printf("{\"reviewDecision\":%q}\n", os.Getenv("FAKEAGENT_GH_REVIEW"))
+			return 0
+		}
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "checks" {
 		fmt.Println("[]")
+		return 0
+	}
+	// The watch run's review-thread signal (gh api graphql reviewThreads).
+	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+		nodes := os.Getenv("FAKEAGENT_GH_THREADS")
+		if nodes == "" {
+			nodes = "[]"
+		}
+		fmt.Printf(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":%s}}}}}`+"\n", nodes)
 		return 0
 	}
 

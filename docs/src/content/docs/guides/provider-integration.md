@@ -3,11 +3,11 @@ title: Provider Integration
 description: Set up GitHub, GitLab, Bitbucket Cloud, Azure DevOps, or ByteDance Codebase for PR creation and CI monitoring.
 ---
 
-The PR and CI steps need to talk to your git host. Five hosts are supported:
+The PR step and the watch run need to talk to your git host. Five hosts are supported:
 GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), Azure DevOps
 (`dev.azure.com` and legacy `*.visualstudio.com`), and ByteDance Codebase
 (`code.byted.org` and `code-tx.byted.org`). Everything else
-short-circuits the PR and CI steps with `skipped`.
+short-circuits the PR step with `skipped`, and derives no watch run.
 
 Provider integration is optional for the local gate. You only need it for the
 steps that happen after validation: opening or updating the PR, watching hosted
@@ -84,7 +84,7 @@ git remote set-url origin git@github.com:parent-owner/repo.git
 no-mistakes init --fork-url git@github.com:your-user/repo.git
 ```
 
-With this setup, the push and CI auto-fix push steps update the fork, while the PR and CI steps stay scoped to the parent repository.
+With this setup, the push step (including a derived fix run's push) updates the fork, while PR creation and the watch run stay scoped to the parent repository.
 The GitHub PR step opens PRs with a fork-qualified head such as `your-user:feature-branch`.
 Re-running `no-mistakes init` later preserves the stored fork URL unless you pass a new `--fork-url`.
 
@@ -238,7 +238,7 @@ Self-hosted GitLab is detected out of the box even when the hostname carries no 
 When the hostname is not obviously GitLab, `no-mistakes` consults glab's configured hosts (`config.yml`, honoring `GLAB_CONFIG_DIR` then `XDG_CONFIG_HOME/glab-cli`, then `~/.config/glab-cli`) and treats the upstream as GitLab if its host appears there as a configured host or `api_host`.
 Running `glab auth login --hostname your-gitlab.example.com` is enough to make detection succeed; if glab is not configured for the host, detection fails closed and the upstream is treated as unsupported.
 
-The GitLab backend is pinned against `glab v1.5x`. Self-hosted detection and the merge-request and CI steps rely on its current flag and API surface, so keep `glab` reasonably up to date.
+The GitLab backend is pinned against `glab v1.5x`. Self-hosted detection, merge-request creation, and the watch run rely on its current flag and API surface, so keep `glab` reasonably up to date.
 
 ## Unsupported hosts
 

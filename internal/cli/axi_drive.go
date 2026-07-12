@@ -476,28 +476,43 @@ func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID
 	}
 }
 
-// ciReadyToMerge reports whether the CI step is actively monitoring and its logs
-// show all checks have passed, meaning the PR is ready for a human to merge. It
-// reads CI state through the same parser the TUI uses (see cimonitor) so the two
-// surfaces never disagree about when a run is "done" from the agent's view.
+// monitorStepName returns the name of a run's PR-monitoring step: `watch` for a
+// watch run, and `ci` for a run recorded before the gate/watch split. It returns
+// "" for a run that monitors no PR (a gate run, which now ends at the pr step).
+func monitorStepName(rv runView) string {
+	for _, s := range rv.Steps {
+		if s.Name == string(types.StepWatch) || s.Name == string(types.StepCI) {
+			return s.Name
+		}
+	}
+	return ""
+}
+
+// ciReadyToMerge reports whether the run's PR monitor is actively watching and
+// its logs show all checks have passed, meaning the PR is ready for a human to
+// merge. It reads that state through the same parser the TUI uses (see
+// cimonitor) so the two surfaces never disagree about when a run is "done" from
+// the agent's view.
 func ciReadyToMerge(rv runView, ciLogs []string) bool {
 	for _, s := range rv.Steps {
-		if s.Name == string(types.StepCI) {
+		if s.Name == string(types.StepWatch) || s.Name == string(types.StepCI) {
 			return s.Status == string(types.StepStatusRunning) && cimonitor.ChecksPassed(ciLogs)
 		}
 	}
 	return false
 }
 
-// ciLogReader returns a reader of the CI step's log lines for a run, sourced
-// from the same on-disk log the daemon writes and `axi logs` reads.
+// ciLogReader returns a reader of a run's monitor-step log lines, sourced from
+// the same on-disk log the daemon writes and `axi logs` reads.
 func ciLogReader(p *paths.Paths) func(string) []string {
 	return func(runID string) []string {
-		data, err := os.ReadFile(filepath.Join(p.RunLogDir(runID), string(types.StepCI)+".log"))
-		if err != nil {
-			return nil
+		for _, step := range []types.StepName{types.StepWatch, types.StepCI} {
+			data, err := os.ReadFile(filepath.Join(p.RunLogDir(runID), string(step)+".log"))
+			if err == nil {
+				return splitLogLines(string(data))
+			}
 		}
-		return splitLogLines(string(data))
+		return nil
 	}
 }
 
@@ -644,6 +659,12 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 			help = append(help, fmt.Sprintf("Open the PR: %s", rv.PRURL))
 		}
 		help = append(help, successReportHelp(fixes)...)
+		// A gate run that opened a PR is finished, and a watch run has taken the
+		// PR over. Say so, or the agent is left guessing whether it should sit
+		// and poll CI itself - which is exactly what it must not do.
+		if rv.PRURL != "" && monitorStepName(rv) == "" {
+			help = append(help, staleMonitorGuidance)
+		}
 		fields = append(fields, toon.Field{Key: "help", Value: help})
 		emitDoc(cmd, fields...)
 		return nil

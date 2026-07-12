@@ -21,6 +21,33 @@ type HousekeepingLintResult struct {
 type RunShared struct {
 	mu               sync.Mutex
 	housekeepingLint *HousekeepingLintResult
+	watchOutcome     *WatchOutcome
+}
+
+// SetWatchOutcome records the watch step's verdict for the daemon to act on
+// once the run finishes.
+func (s *RunShared) SetWatchOutcome(outcome WatchOutcome) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.watchOutcome = &outcome
+}
+
+// WatchOutcome returns the watch step's verdict, or nil when the run produced
+// none (it was not a watch run, or it was cancelled before converging).
+func (s *RunShared) WatchOutcome() *WatchOutcome {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.watchOutcome == nil {
+		return nil
+	}
+	outcome := *s.watchOutcome
+	return &outcome
 }
 
 // SetHousekeepingLint records the combined pass's lint assessment for the

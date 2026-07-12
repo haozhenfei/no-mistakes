@@ -25,12 +25,32 @@ const (
 	RunInterruptReasonDaemonCrashed      = "daemon crashed during execution"
 )
 
+// RunKind splits the pipeline at the PR boundary, which is where state
+// ownership changes hands. A gate run owns local state (worktree, git index,
+// agent sessions) and terminates when the PR exists. A watch run owns nothing
+// local: it is a poller over state the SCM server owns (PR head, check runs,
+// review threads, approval), so it needs no worktree and can be re-armed from
+// scratch after any restart.
+type RunKind string
+
+const (
+	RunKindGate  RunKind = "gate"
+	RunKindWatch RunKind = "watch"
+)
+
+// Watch reports whether the kind is a post-PR watch run.
+func (k RunKind) Watch() bool { return k == RunKindWatch }
+
+// Valid reports whether the kind is one this build knows how to execute.
+func (k RunKind) Valid() bool { return k == RunKindGate || k == RunKindWatch }
+
 // StepName identifies a pipeline step.
 type StepName string
 
 const (
 	StepIntent   StepName = "intent"
 	StepRebase   StepName = "rebase"
+	StepFix      StepName = "fix"
 	StepReview   StepName = "review"
 	StepTest     StepName = "test"
 	StepVerify   StepName = "verify"
@@ -38,7 +58,16 @@ const (
 	StepLint     StepName = "lint"
 	StepPush     StepName = "push"
 	StepPR       StepName = "pr"
-	StepCI       StepName = "ci"
+
+	// StepWatch is the only step of a watch run: it polls the PR the parent
+	// gate run opened and converges on merged/closed, a fix round, or an
+	// escalation to a human.
+	StepWatch StepName = "watch"
+
+	// StepCI is the pre-split blocking CI monitor. It no longer runs: watch
+	// runs took over post-PR monitoring. The name is kept so historical
+	// step_results rows still scan and render.
+	StepCI StepName = "ci"
 )
 
 func normalizeStepName(s StepName) StepName {
@@ -77,37 +106,64 @@ func (s StepName) Value() (driver.Value, error) {
 	return string(s), nil
 }
 
-// StepOrder returns the fixed execution order for a step (1-indexed).
+// StepOrder returns the fixed execution order for a step (1-indexed). Gate and
+// watch steps are ordered within their own run kind; the two sequences never
+// share a run.
 func (s StepName) Order() int {
 	switch s {
 	case StepIntent:
 		return 1
 	case StepRebase:
 		return 2
-	case StepReview:
+	case StepFix:
 		return 3
-	case StepTest:
+	case StepReview:
 		return 4
-	case StepVerify:
+	case StepTest:
 		return 5
-	case StepDocument:
+	case StepVerify:
 		return 6
-	case StepLint:
+	case StepDocument:
 		return 7
-	case StepPush:
+	case StepLint:
 		return 8
-	case StepPR:
+	case StepPush:
 		return 9
-	case StepCI:
+	case StepPR:
 		return 10
+	case StepWatch:
+		return 1
+	case StepCI:
+		return 11 // legacy; never executed
 	default:
 		return 0
 	}
 }
 
-// AllSteps returns all pipeline steps in execution order.
-func AllSteps() []StepName {
-	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepVerify, StepDocument, StepLint, StepPush, StepPR, StepCI}
+// GateSteps returns the gate pipeline in execution order. It terminates at the
+// PR: everything after that boundary is a watch run's business.
+func GateSteps() []StepName {
+	return []StepName{StepIntent, StepRebase, StepFix, StepReview, StepTest, StepVerify, StepDocument, StepLint, StepPush, StepPR}
+}
+
+// WatchSteps returns the watch pipeline in execution order.
+func WatchSteps() []StepName {
+	return []StepName{StepWatch}
+}
+
+// StepsForKind returns the step sequence a run of the given kind executes.
+func StepsForKind(kind RunKind) []StepName {
+	if kind.Watch() {
+		return WatchSteps()
+	}
+	return GateSteps()
+}
+
+// KnownSteps returns every step name this build recognizes, across both run
+// kinds. Use it to validate user-supplied step names and to enumerate steps for
+// reporting; use GateSteps/WatchSteps when you mean one run's sequence.
+func KnownSteps() []StepName {
+	return append(GateSteps(), WatchSteps()...)
 }
 
 // StepStatus represents the lifecycle state of a pipeline step.

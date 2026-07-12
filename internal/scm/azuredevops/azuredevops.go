@@ -279,3 +279,13 @@ func (h *Host) toPR(raw *azPR) *scm.PR {
 		URL:    webPRURL(h.org, h.project, h.repo, raw.Repository.WebURL, id),
 	}
 }
+
+// ListReviewThreads and GetReviewState are not wired for Azure DevOps yet; both
+// degrade to ErrUnsupported, matching Capabilities.
+func (h *Host) ListReviewThreads(_ context.Context, _ *scm.PR) ([]scm.ReviewThread, error) {
+	return nil, scm.ErrUnsupported
+}
+
+func (h *Host) GetReviewState(_ context.Context, _ *scm.PR) (scm.ReviewState, error) {
+	return "", scm.ErrUnsupported
+}

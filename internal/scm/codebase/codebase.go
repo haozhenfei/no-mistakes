@@ -89,7 +89,7 @@ func isWindowsDrivePath(raw string) bool {
 func (h *Host) Provider() scm.Provider { return scm.ProviderCodebase }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewThreads: true, ReviewState: true}
 }
 
 // repoArgs appends -R <repo> when a repo slug is known. When it is empty,
@@ -362,6 +362,9 @@ type mrStatusResponse struct {
 				UnmergeableReason string `json:"UnmergeableReason"`
 			} `json:"detail"`
 		} `json:"mergeability"`
+		Review struct {
+			Status string `json:"status"`
+		} `json:"review"`
 		CheckRuns struct {
 			Items []checkRunItem `json:"items"`
 		} `json:"check_runs"`

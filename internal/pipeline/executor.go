@@ -320,6 +320,16 @@ func (e *Executor) initializeRunScopes(runID string) {
 	e.shared = &RunShared{}
 }
 
+// WatchOutcome returns the verdict a watch run's step reached, or nil for a run
+// that produced none. The daemon reads it after Execute returns to decide
+// whether to derive a fix gate run.
+func (e *Executor) WatchOutcome() *WatchOutcome {
+	e.mu.Lock()
+	shared := e.shared
+	e.mu.Unlock()
+	return shared.WatchOutcome()
+}
+
 type stepExecutionState struct {
 	fixing           bool
 	previousFindings string

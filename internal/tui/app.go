@@ -58,7 +58,7 @@ type Model struct {
 // NewModel creates a TUI model for the given run.
 // The client should already be connected to the daemon.
 func NewModel(socketPath string, client *ipc.Client, run *ipc.RunInfo) Model {
-	syntheticSteps := len(run.Steps) == 0 && shouldBackfillPipelineSteps(run.Status, run.Steps, types.AllSteps())
+	syntheticSteps := len(run.Steps) == 0 && shouldBackfillPipelineSteps(run.Status, run.Steps, types.GateSteps())
 	steps := normalizePipelineSteps(run.ID, run.Status, run.Steps)
 	run.Steps = steps
 	m := Model{
@@ -97,7 +97,7 @@ func NewModel(socketPath string, client *ipc.Client, run *ipc.RunInfo) Model {
 }
 
 func normalizePipelineSteps(runID string, runStatus types.RunStatus, steps []ipc.StepResultInfo) []ipc.StepResultInfo {
-	knownSteps := types.AllSteps()
+	knownSteps := types.GateSteps()
 	if !shouldBackfillPipelineSteps(runStatus, steps, knownSteps) {
 		return steps
 	}
@@ -273,7 +273,7 @@ func (m Model) terminalTitle() string {
 		icon := stepStatusIndicator(s.Status, m.spinnerFrame)
 		switch s.Status {
 		case types.StepStatusRunning, types.StepStatusFixing:
-			if s.StepName == types.StepCI && parseCIActivity(m.logs).Ready {
+			if isMonitorStep(s.StepName) && parseCIActivity(m.logs).Ready {
 				return "✓ Checks passed" + suffix
 			}
 			return icon + " " + stepLabel(s.StepName) + suffix
