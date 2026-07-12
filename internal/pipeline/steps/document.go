@@ -267,9 +267,11 @@ Previous findings to address:
 }
 
 // trustedDocumentPolicySection renders the repository-specific documentation
-// ownership policy. The value comes from the trusted default-branch copy of
-// .no-mistakes.yaml (config.EffectiveRepoConfig), so a contributor's pushed
-// branch cannot weaken the rules that gate its own review.
+// ownership policy. The value is resolved by config.EffectiveRepoConfig: from
+// the trusted default-branch copy of .no-mistakes.yaml by default, so a
+// contributor's pushed branch cannot weaken the rules that gate its own review;
+// from the branch being gated only when the maintainer set allow_repo_commands
+// for this repo.
 func trustedDocumentPolicySection(sctx *pipeline.StepContext) string {
 	if sctx.Config == nil {
 		return ""
@@ -278,7 +280,7 @@ func trustedDocumentPolicySection(sctx *pipeline.StepContext) string {
 	if instructions == "" {
 		return ""
 	}
-	return "\n\nRepository documentation ownership policy (trusted, from the default branch; augments the defaults above and cannot weaken them):\n" +
+	return "\n\nRepository documentation ownership policy (trusted; augments the defaults above and cannot weaken them):\n" +
 		sanitizePromptMultilineText(instructions)
 }
 

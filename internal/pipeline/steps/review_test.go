@@ -222,7 +222,7 @@ func TestReviewStep_PromptCarriesRepoReviewInstructions(t *testing.T) {
 	prompt := ag.calls[0].Prompt
 	for _, want := range []string{
 		// The repo's rules reach the agent.
-		"Repository review instructions (trusted, from the default branch)",
+		"Repository review instructions (trusted)",
 		"Follow the review checklist in .claude/skills/coze-cr/SKILL.md.",
 		"Flag any new use of `any`.",
 		// They may widen the built-in scope...

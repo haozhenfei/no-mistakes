@@ -257,8 +257,9 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	return config.Merge(globalCfg, config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)), nil
 }
 
-// resolveAllowRepoCommands decides whether the pushed branch's commands/agent
-// may run. Both inputs are maintainer-controlled and the pushed branch is not
+// resolveAllowRepoCommands decides whether the pushed branch's own repo config
+// (commands/agent/upload_cmd plus the review and document instructions) is
+// honored. Both inputs are maintainer-controlled and the pushed branch is not
 // among them: the global config's per-repo override wins when configured (only
 // the owner of the daemon host can write ~/.no-mistakes/config.yaml), otherwise
 // the trusted default-branch copy of .no-mistakes.yaml decides.
@@ -1023,32 +1024,37 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 		trackStartFailure("load_repo_config")
 		return "", fmt.Errorf("load repo config: %w", err)
 	}
-	// SECURITY: load the code-executing selection fields (commands.* and
-	// agent) from the trusted default-branch copy of .no-mistakes.yaml rather
-	// than the pushed SHA. The worktree is checked out at headSHA (the
-	// contributor's branch), so reading repoCfg above would honor a
-	// contributor's commands/agent and let any pushed SHA run arbitrary shell
-	// (sh -c) or pick the launched agent (incl. acp: targets) on the daemon
-	// host with the maintainer's env (GH_TOKEN, SSH agent, ...).
-	// EffectiveRepoConfig replaces commands + agent with the trusted
-	// default-branch values unless the maintainer has explicitly opted in.
+	// SECURITY: load the code-executing selection fields (commands.*, agent,
+	// test.evidence.upload_cmd) and the gate-prompt policy fields
+	// (review.instructions, document.instructions) from the trusted
+	// default-branch copy of .no-mistakes.yaml rather than the pushed SHA. The
+	// worktree is checked out at headSHA (the contributor's branch), so reading
+	// repoCfg above would honor a contributor's commands/agent and let any
+	// pushed SHA run arbitrary shell (sh -c) or pick the launched agent (incl.
+	// acp: targets) on the daemon host with the maintainer's env (GH_TOKEN, SSH
+	// agent, ...) — and let the branch rewrite the review rules that gate it.
+	// EffectiveRepoConfig replaces all of them with the trusted default-branch
+	// values unless the maintainer has explicitly opted in, in which case the
+	// whole repo config is read from the pushed branch.
 	//
 	// allow_repo_commands is read ONLY from maintainer-controlled sources —
 	// the global config's per-repo override, else the trusted default-branch
 	// copy (resolveAllowRepoCommands). A contributor cannot self-enable it from
 	// the pushed branch. With no trusted copy (fetch failed, no default branch,
-	// or no file on it) and no override, the opt-in is false and commands/agent
+	// or no file on it) and no override, the opt-in is false and those fields
 	// are forced empty — fail closed.
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
 	allowRepoCommands := resolveAllowRepoCommands(globalCfg, repo, trustedRepoCfg)
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	if allowRepoCommands {
-		slog.Warn("allow_repo_commands is enabled by the maintainer: honoring commands/agent from pushed branch", "run_id", run.ID, "branch", branch)
-	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) {
-		// Surface the silent override so a maintainer who shipped a commands.*
-		// or agent change on a feature branch understands why it did not run.
-		// This is not an error: it is the secure default in action.
-		slog.Info("repo commands/agent loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
+		slog.Warn("allow_repo_commands is enabled by the maintainer: reading the repo config (commands, agent, review/document instructions) from the pushed branch", "run_id", run.ID, "branch", branch)
+	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) ||
+		repoCfg.Review != effectiveRepoCfg.Review || repoCfg.Document != effectiveRepoCfg.Document {
+		// Surface the silent override so a maintainer who shipped a commands.*,
+		// agent, or review/document instructions change on a feature branch
+		// understands why it did not take effect. This is not an error: it is
+		// the secure default in action.
+		slog.Info("repo commands/agent/instructions loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
 
