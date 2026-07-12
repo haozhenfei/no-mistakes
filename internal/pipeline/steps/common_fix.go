@@ -50,37 +50,62 @@ func hasBlockingFindings(items []Finding) bool {
 	return false
 }
 
+// commitAgentFixes adopts whatever work the agent left in the worktree, in
+// either of the two shapes an agent can leave it in: uncommitted edits (which
+// this function commits), or commits the agent made itself.
+//
+// "Did the agent do anything" is decided by whether the worktree HEAD moved,
+// never by whether the worktree is dirty. An agent that commits its own fix -
+// which the fix step's prompt explicitly asks for, so the rest of the gate can
+// review, test, and lint it - leaves a clean worktree behind, and a dirty-only
+// test reads that as "produced nothing": the fix step then parked a run whose
+// findings had in fact been fixed and committed, and every retry re-ran the
+// agent against an already-clean worktree and parked again. Adopting the HEAD
+// advance is what keeps run.HeadSHA, the local branch ref, and (through the
+// push step, which pushes that ref) origin all pointing at the agent's work.
+//
+// The before-image is sctx.Run.HeadSHA: every step that moves the worktree HEAD
+// (rebase, this function, push) keeps it in sync, so at entry it is the HEAD the
+// agent started from.
 func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string) error {
 	ctx := sctx.Ctx
+	previousHead := sctx.Run.HeadSHA
+
+	commitMessage := ""
 	status, _ := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
-	if strings.TrimSpace(status) == "" {
+	if strings.TrimSpace(status) != "" {
+		if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
+			return fmt.Errorf("stage %s changes: %w", stepName, err)
+		}
+		if summary == "" {
+			summary = fallbackSummary
+		}
+		commitMessage = deterministicFixCommitMessage(stepName, summary)
+		if _, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", commitMessage); err != nil {
+			return fmt.Errorf("commit %s changes: %w", stepName, err)
+		}
+	}
+
+	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("resolve head after %s: %w", stepName, err)
+	}
+	if headSHA == "" || headSHA == previousHead {
 		sctx.Log("no agent changes to commit")
 		return nil
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
-		return fmt.Errorf("stage %s changes: %w", stepName, err)
+	if commitMessage != "" {
+		sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
+	} else {
+		sctx.Log(fmt.Sprintf("adopting the commit(s) the agent made itself (head %s)", shortSHA(headSHA)))
 	}
-	if summary == "" {
-		summary = fallbackSummary
-	}
-	commitMessage := deterministicFixCommitMessage(stepName, summary)
-	if _, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", commitMessage); err != nil {
-		return fmt.Errorf("commit %s changes: %w", stepName, err)
-	}
-	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
-	if err != nil {
-		return fmt.Errorf("resolve head after %s commit: %w", stepName, err)
-	}
+
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, headSHA); err != nil {
 		return fmt.Errorf("update local branch ref: %w", err)
 	}
 	sctx.Run.HeadSHA = headSHA
-	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-		return err
-	}
-	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
-	return nil
+	return sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA)
 }
 
 func extractCommitSummary(result *agent.Result) (string, error) {
