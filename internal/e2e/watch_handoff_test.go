@@ -34,8 +34,15 @@ func TestPRHandsOffToWatchRun(t *testing.T) {
 	// land back on file://, while fork routing preserves the literal parent URL.
 	// The fork itself is incidental here - what this test is about is what
 	// happens the moment the PR exists.
-	parentURL := "https://github.com/test-owner/no-mistakes.git"
-	forkURL := "https://github.com/fork-owner/no-mistakes.git"
+	// These URLs must be unique to this test. configureGitURLRewrite writes a
+	// `url.<local path>.insteadOf <url>` entry into the global git config, and
+	// where that config lands is not always per-test (a CI runner with a shared
+	// XDG git config makes every e2e test write to the same file). Two tests
+	// claiming the same fake URL then leave two insteadOf entries for it, git
+	// picks one, and the loser's push resolves to the other test's already-
+	// deleted directory.
+	parentURL := "https://github.com/watch-parent-owner/no-mistakes.git"
+	forkURL := "https://github.com/watch-fork-owner/no-mistakes.git"
 
 	forkDir := filepath.Join(filepath.Dir(h.UpstreamDir), "watch-fork.git")
 	if err := os.MkdirAll(forkDir, 0o755); err != nil {
@@ -54,7 +61,7 @@ func TestPRHandsOffToWatchRun(t *testing.T) {
 	}
 
 	t.Setenv("FAKEAGENT_GH_MODE", "fork-pr")
-	t.Setenv("FAKEAGENT_GH_PARENT", "test-owner/no-mistakes")
+	t.Setenv("FAKEAGENT_GH_PARENT", "watch-parent-owner/no-mistakes")
 	// The PR is merged by the time the watcher looks, so the watch run
 	// converges on its first poll instead of idling for the test's duration.
 	t.Setenv("FAKEAGENT_GH_PR_STATE", "MERGED")
