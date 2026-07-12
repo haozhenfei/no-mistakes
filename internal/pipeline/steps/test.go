@@ -250,7 +250,7 @@ Rules:
 			EvidenceDir: evidenceDir,
 			Branch:      sctx.Run.Branch,
 			RunID:       sctx.Run.ID,
-			Env:         sctx.Env,
+			Env:         append(append([]string{}, sctx.Env...), repoCommandEnv(sctx)...),
 			Evidence:    sctx.Config.Test.Evidence,
 			Log:         sctx.Log,
 		}, &findings)

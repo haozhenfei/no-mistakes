@@ -238,8 +238,12 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 	return runShellCommandWithEnv(ctx, dir, nil, cmdStr)
 }
 
+// runStepShellCommand runs a repo command (commands.test / lint / format) from
+// .no-mistakes.yaml. It exports the run's refs (NM_BASE_REF, NM_HEAD_REF, ...)
+// so the command can scope itself to the change - see repo_env.go.
 func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
-	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr)
+	env := append(append([]string{}, sctx.Env...), repoCommandEnv(sctx)...)
+	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, env, cmdStr)
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {
@@ -252,7 +256,7 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 	shellenv.ConfigureShellCommand(cmd)
 	cmd.Dir = dir
 	if len(env) > 0 {
-		cmd.Env = mergeEnv(env)
+		cmd.Env = mergeEnv(withPWD(dir, env))
 	}
 	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {

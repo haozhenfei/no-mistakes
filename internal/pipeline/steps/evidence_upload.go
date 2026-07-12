@@ -134,12 +134,12 @@ func runEvidenceUpload(ctx context.Context, sctx uploadContext, uploadCmd string
 	}
 	shellenv.ConfigureShellCommand(cmd)
 	cmd.Dir = sctx.WorkDir
-	cmd.Env = mergeEnv(append(append([]string{}, sctx.Env...),
+	cmd.Env = mergeEnv(withPWD(sctx.WorkDir, append(append([]string{}, sctx.Env...),
 		"NM_EVIDENCE_FILE="+absPath,
 		"NM_EVIDENCE_LABEL="+label,
 		"NM_EVIDENCE_RUN_ID="+sctx.RunID,
 		"NM_EVIDENCE_BRANCH="+sctx.Branch,
-	))
+	)))
 
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {

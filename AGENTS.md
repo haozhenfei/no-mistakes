@@ -96,6 +96,13 @@ Safest local verification sequence after non-trivial changes:
 - Every invocation of the three commands is logged with caller attribution (PID, PPID, parent command line) via `logLifecycleInvocation` to `<NM_HOME>/logs/cli.log`; this is the incident forensic trail, do not remove or weaken it.
 - Regressions: `TestDaemonStopRefusesWithActiveRunsAndListsThem`, `TestDaemonStopForceOverridesActiveRunGuard`, `TestDaemonRestartRefusesWithActiveRuns`, `TestLifecycleCommandsWriteCallerAttributionToCLILog` (`internal/cli/daemon_lifecycle_test.go`), `TestUpdaterRunRefusesWithActiveRunsAndListsThem`, `TestUpdaterActiveRunGuardAllowsForce` (`internal/update`).
 
+**Repo-Command Ref Environment (`internal/pipeline/steps/repo_env.go`)**
+
+- Every repo command (`commands.{test,lint,format}`, `test.evidence.upload_cmd`) runs with the run's refs in its environment (`NM_BASE_REF`, `NM_BASE_SHA`, `NM_HEAD_REF`, `NM_HEAD_SHA`, `NM_DEFAULT_BRANCH`, `NM_RUN_ID`), so a monorepo can scope an incremental build instead of hardcoding a branch name. This is a **public contract** for `.no-mistakes.yaml` authors: `docs/src/content/docs/reference/environment.md` owns the names and semantics; renaming one is a breaking change.
+- Values are derived from what the run already knows (the run row plus the worktree's git state, via the same helpers the rebase step uses); an unresolvable value is omitted, never guessed. `StepContext.Env` stays the test-only injection channel and is NOT where these live.
+- Any command that carries extra env must thread `PWD` through itself (`withPWD`): os/exec injects `PWD=Cmd.Dir` only when `Cmd.Env` is nil - see `git.NonInteractiveEnv` for the same trap.
+- Regressions: `TestRepoCommandEnv_*`, `TestLintStep_RepoCommandSeesRunRefs` (`internal/pipeline/steps`), e2e `TestRepoCommandsSeeRunRefs`.
+
 **Testing Conventions**
 
 - Prefer e2e tests for behavior that crosses a process or I/O boundary (CLI flags, config loading, git operations, agent spawning, daemon coordination, stdout/stderr, recorded fixtures); unit-test pure helpers where speed and failure localization matter. Prefer creating real git repos in temp dirs over heavy mocking.
