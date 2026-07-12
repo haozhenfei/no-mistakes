@@ -103,6 +103,7 @@ Adversarially verifies evidence-bound claims and audits the coverage ledger.
 **Behavior:**
 - Loads signed evidence and registered claims from the run
 - Uses independent skeptic prompts to adjudicate evidence-bound claims as `CONFIRMED`, `PLAUSIBLE`, or `REFUTED`. `verify.skeptics` sets how many run per claim; it defaults to `1`, so a single skeptic's verdict is final. Majority voting only applies when it is raised to `3` or more, at the cost of that many agent calls per claim
+- A skeptic that could not be evaluated at all — the agent failed to start, crashed, or returned no structured verdict — is not a verdict. The step fails with `verification did not run` rather than substituting a default one, so an unusable agent can never be mistaken for a passing gate
 - Runs the coverage audit over the changed hunks, coverage ledger, and captured instrumentation evidence
 - Backfills runtime truth from captured coverage, downgrading unsupported `runtime-verified` labels and inserting `unverified` rows for changed hunks no gate recorded
 - Surfaces coverage audit issues as non-parking findings; REFUTED claims are the verification failures that park the run

@@ -298,7 +298,15 @@ func runHappyPath(t *testing.T, agentName string) {
 func cleanReviewScenario(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "scenario.yaml")
+	// verify adjudicates actionable review findings, so this scenario must be
+	// able to answer the skeptic prompt with a verdict (the clean catch-all has
+	// none, and verify fails rather than inventing one).
 	content := `actions:
+  - match: "whose job is to REFUTE"
+    text: "the evidence supports the claim"
+    structured:
+      verdict: CONFIRMED
+      rationale: "fakeagent: the captured evidence supports the claim"
   - match: "report only what you could not resolve.\n\nContext:\n- branch: document-agent-error"
     text: "document agent error"
     edits:

@@ -25,7 +25,15 @@ const axiIntent = "wire the feature flag into the config loader"
 func axiScenario(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "axi-scenario.yaml")
+	// A scenario with its own action list must answer the verify step's skeptic
+	// prompt with a verdict: the generic clean response has no verdict field,
+	// and verify fails the step rather than inventing one.
 	content := `actions:
+  - match: "whose job is to REFUTE"
+    text: "the evidence supports the claim"
+    structured:
+      verdict: CONFIRMED
+      rationale: "fakeagent: the captured evidence supports the claim"
   - match: "Review the code changes and return structured findings"
     text: "review found a warning"
     structured:

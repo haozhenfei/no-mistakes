@@ -77,12 +77,31 @@ func loadScenario(path string) (*Scenario, error) {
 	return &s, nil
 }
 
+// skepticMatch is the distinctive phrase in the verify step's skeptic prompt.
+// The skeptic schema is the one schema the generic clean response cannot
+// satisfy — it needs a verdict, and verify (correctly) fails the step rather
+// than inventing one when the agent returns none.
+const skepticMatch = "whose job is to REFUTE"
+
+// skepticAction is the fake's skeptic verdict: a real agent invoked with the
+// skeptic JSON schema returns one, so the fake must too.
+func skepticAction() Action {
+	return Action{
+		Match: skepticMatch,
+		Text:  "the evidence supports the claim",
+		Structured: map[string]any{
+			"verdict":   "CONFIRMED",
+			"rationale": "fakeagent: the captured evidence supports the claim",
+		},
+	}
+}
+
 // defaultScenario returns an "everything is clean" response that satisfies
-// every JSON schema no-mistakes hands to an agent: empty findings array,
-// low risk, a populated tested array for the test step.
+// every JSON schema no-mistakes hands to an agent: a skeptic verdict for the
+// verify step, then empty findings, low risk, and a populated tested array.
 func defaultScenario() *Scenario {
 	return &Scenario{
-		Actions: []Action{{
+		Actions: []Action{skepticAction(), {
 			Text: "no issues found",
 			Structured: map[string]any{
 				"findings":        []any{},
