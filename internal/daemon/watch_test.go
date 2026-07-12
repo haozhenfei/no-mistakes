@@ -76,12 +76,28 @@ func newTestManager(t *testing.T) (*RunManager, *paths.Paths, *db.DB) {
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
+	// startRun resolves a real agent binary before it launches a pipeline, so a
+	// manager test needs one on disk even when its mock steps never call it.
+	// Without this the tests only pass on a machine that happens to have claude
+	// or codex installed.
+	writeManagerGlobalConfig(t, p, "")
 	d, err := db.Open(p.DB())
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
 	return NewRunManager(d, p, nil), p, d
+}
+
+// writeManagerGlobalConfig writes a hermetic global config pointing the agent at
+// a mock binary, plus any extra YAML the test needs.
+func writeManagerGlobalConfig(t *testing.T, p *paths.Paths, extraYAML string) {
+	t.Helper()
+	mockClaude := writeMockClaude(t, t.TempDir())
+	content := "agent: claude\nagent_path_override:\n  claude: " + mockClaude + "\n" + extraYAML
+	if err := os.WriteFile(p.ConfigFile(), []byte(content), 0o644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
 }
 
 func waitForRunStatus(t *testing.T, d *db.DB, runID string, want types.RunStatus) *db.Run {
@@ -371,12 +387,11 @@ func (s *recordingStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutco
 	return &pipeline.StepOutcome{}, nil
 }
 
+// writeGlobalAutoFixCI sets the CI fix-round budget, keeping the agent override
+// the manager needs to start a run.
 func writeGlobalAutoFixCI(t *testing.T, p *paths.Paths, limit int) {
 	t.Helper()
-	content := fmt.Sprintf("auto_fix:\n  ci: %d\n", limit)
-	if err := os.WriteFile(p.ConfigFile(), []byte(content), 0o644); err != nil {
-		t.Fatalf("write global config: %v", err)
-	}
+	writeManagerGlobalConfig(t, p, fmt.Sprintf("auto_fix:\n  ci: %d\n", limit))
 }
 
 // TestParkedWatchRunFixResponseDerivesGateRun covers the conservative path end
