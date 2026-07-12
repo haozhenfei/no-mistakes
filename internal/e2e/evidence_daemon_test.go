@@ -107,11 +107,30 @@ func TestEvidenceCommandsWorkWhileDaemonRuns(t *testing.T) {
 		t.Fatalf("daemon should still be running after the evidence commands: %v\n%s", err, out)
 	}
 
-	// Clear the gate and let the run finish. Leaving a run active would make
-	// the harness's `daemon stop` refuse (the lifecycle guard) and leak this
-	// test's daemon into the rest of the suite.
+	// Clear the review gate and let the run walk on. It now parks again at
+	// verify, and that is the point: `claim add` above registered a behavior
+	// claim (the default kind) about this change, and nothing in this run ever
+	// executed the changed code under instrumentation — no coverage evidence,
+	// so every changed hunk is attested at best. A behavior claim with no
+	// runtime evidence must not pass the gate quietly.
 	h.Respond(parked.ID, types.StepReview, types.ActionApprove)
-	waitForRunIDStatus(t, h, parked.ID, types.RunCompleted, 60*time.Second)
+	verifyParked := waitForStepStatus(t, h, "feature/evidence", types.StepVerify, types.StepStatusAwaitingApproval, 90*time.Second)
+	if verifyParked == nil {
+		t.Fatal("verify must park a behavior claim that no runtime-verified hunk backs")
+	}
+	verifyStep, ok := findStep(verifyParked.Steps, types.StepVerify)
+	if !ok || verifyStep.FindingsJSON == nil {
+		t.Fatalf("verify step has no findings: %+v", verifyParked.Steps)
+	}
+	if !strings.Contains(*verifyStep.FindingsJSON, "NO RUNTIME EVIDENCE") {
+		t.Fatalf("verify must say the behavior claim has no runtime evidence, got %s", *verifyStep.FindingsJSON)
+	}
+
+	// A human/agent decision clears it. Leaving a run active would make the
+	// harness's `daemon stop` refuse (the lifecycle guard) and leak this test's
+	// daemon into the rest of the suite.
+	h.Respond(verifyParked.ID, types.StepVerify, types.ActionApprove)
+	waitForRunIDStatus(t, h, parked.ID, types.RunCompleted, 90*time.Second)
 }
 
 // assertNoDaemonLockAbort fails when a command aborted on the daemon's singleton

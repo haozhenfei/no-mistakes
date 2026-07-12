@@ -13,9 +13,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/claims"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/coverage"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // verdictAgent returns a fixed skeptic verdict for every call.
@@ -29,31 +31,57 @@ func verdictAgent(verdict, rationale string) *mockAgent {
 	}
 }
 
-// seedVerifyContext builds a verify StepContext with paths, an evidence store,
-// and one captured evidence entry, returning the context and the evidence id.
+// seedVerifyContext builds a verify StepContext over a real git repo (so the
+// coverage audit can diff base..head) with paths, an evidence store, one
+// captured command-output entry, and captured instrumentation coverage over the
+// changed hunk — i.e. a run whose behavior claims ARE runtime-backed. Returns
+// the context and the command-output evidence id.
 func seedVerifyContext(t *testing.T, ag agent.Agent) (*pipeline.StepContext, string) {
 	t.Helper()
-	workDir := t.TempDir()
-	sctx := newTestContextWithDBRecords(t, ag, workDir, "base", "head", config.Commands{})
+	sctx, evID, store := seedVerifyContextWithoutRuntimeCoverage(t, ag)
+	// The repo template's diff is feature.txt:1. Capture instrumentation that
+	// executed exactly that line, so backfill promotes the hunk to
+	// runtime-verified the way a real `go test -coverprofile` run would.
+	profile := filepath.Join(t.TempDir(), "cover.out")
+	if err := os.WriteFile(profile, []byte("mode: set\nfeature.txt:1.1,1.13 1 1\n"), 0o644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+	if _, err := store.Coverage(context.Background(), evidence.CoverageOpts{
+		Label: "unit tests with coverage", Argv: []string{"printf", "ok"},
+		Format: coverage.FormatGo, CoverProfile: profile,
+		Dir: sctx.WorkDir, RepoRoot: sctx.WorkDir,
+	}); err != nil {
+		t.Fatalf("coverage evidence: %v", err)
+	}
+	return sctx, evID
+}
+
+// seedVerifyContextWithoutRuntimeCoverage is the same context with NO
+// instrumentation coverage captured: every changed hunk stays attested /
+// unverified. This is the coze 6951 shape — an agent asserting user-visible
+// behavior with nothing that ever executed the changed code.
+func seedVerifyContextWithoutRuntimeCoverage(t *testing.T, ag agent.Agent) (*pipeline.StepContext, string, *evidence.Store) {
+	t.Helper()
+	repoDir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, ag, repoDir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.Verify = config.Verify{Skeptics: 3}
 
-	nmHome := t.TempDir()
-	sctx.Paths = paths.WithRoot(nmHome)
+	sctx.Paths = paths.WithRoot(t.TempDir())
 	key, err := evidence.LoadOrCreateKey(sctx.Paths.EvidenceKeyFile())
 	if err != nil {
 		t.Fatalf("load key: %v", err)
 	}
-	store, err := evidence.Open(evidence.DirForBranch(workDir, sctx.Run.Branch), key)
+	store, err := evidence.Open(evidence.DirForBranch(repoDir, sctx.Run.Branch), key)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	entry, err := store.Exec(context.Background(), evidence.ExecOpts{
-		Label: "login e2e", Argv: []string{"printf", "PASS"}, Dir: workDir, RepoRoot: workDir,
+		Label: "login e2e", Argv: []string{"printf", "PASS"}, Dir: repoDir, RepoRoot: repoDir,
 	})
 	if err != nil {
 		t.Fatalf("exec evidence: %v", err)
 	}
-	return sctx, entry.ID
+	return sctx, entry.ID, store
 }
 
 func TestVerifyStep_RefutedParks(t *testing.T) {
@@ -118,9 +146,14 @@ func TestVerifyStep_RefutedParks(t *testing.T) {
 // same silent-degradation shape as the skeptic bug above.
 func TestVerifyStep_CoverageAuditFailureIsVisible(t *testing.T) {
 	ag := verdictAgent(claims.VerdictConfirmed, "clear")
-	sctx, evID := seedVerifyContext(t, ag) // workDir is not a git repo: the audit cannot diff
+	sctx, evID := seedVerifyContext(t, ag)
+	sctx.WorkDir = t.TempDir() // not a git repo: the audit cannot diff
+	// A rule-compliance claim asserts no runtime behavior, so the audit failure
+	// is the only thing under test here: it must be visible, and on its own it
+	// must not park. (A behavior claim in the same situation DOES park — see
+	// TestVerifyStep_CoverageAuditFailureBlocksBehaviorRuntimePass.)
 	if _, err := sctx.DB.InsertClaim(claims.Claim{
-		RunID: sctx.Run.ID, Step: "test", Text: "login works", Kind: claims.KindBehavior, Evidence: []string{evID},
+		RunID: sctx.Run.ID, Step: "test", Text: "no new lint suppressions", Kind: claims.KindRuleCompliance, Evidence: []string{evID},
 	}); err != nil {
 		t.Fatalf("insert claim: %v", err)
 	}
@@ -433,5 +466,121 @@ func TestMajorityVerdict(t *testing.T) {
 		if got := majorityVerdict(c.votes); got != c.want {
 			t.Errorf("majorityVerdict(%v) = %q, want %q", c.votes, got, c.want)
 		}
+	}
+}
+
+// TestVerifyStep_BehaviorClaimWithoutRuntimeEvidenceCannotPass pins the second
+// half of the coze 6951 failure: all four product hunks sat at "attested" (the
+// ledger honestly reporting "an agent said so, nothing executed it") while the
+// run's one product-behavior claim was recorded as verified and the run
+// completed. "attested" is a report of missing runtime evidence, so it can never
+// back a behavior-class claim: the claim may not be CONFIRMED, and the run parks
+// for a decision instead of passing quietly.
+func TestVerifyStep_BehaviorClaimWithoutRuntimeEvidenceCannotPass(t *testing.T) {
+	ag := verdictAgent(claims.VerdictConfirmed, "the screenshots show the fixed row color")
+	sctx, evID, _ := seedVerifyContextWithoutRuntimeCoverage(t, ag)
+	if _, err := sctx.DB.InsertCoverageEntry(coverage.LedgerEntry{
+		RunID: sctx.Run.ID, File: "feature.txt", StartLine: 1, EndLine: 1,
+		State: coverage.StateAttested, Evidence: []string{evID}, Source: "test",
+	}); err != nil {
+		t.Fatalf("insert coverage entry: %v", err)
+	}
+	claim, err := sctx.DB.InsertClaim(claims.Claim{
+		RunID: sctx.Run.ID, Step: "test", Text: "the preview row is no longer green",
+		Kind: claims.KindRegressionFixed, Evidence: []string{evID},
+	})
+	if err != nil {
+		t.Fatalf("insert claim: %v", err)
+	}
+
+	outcome, err := (&VerifyStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("verify execute: %v", err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("a behavior claim with no runtime evidence must park, not pass quietly")
+	}
+	if outcome.AutoFixable {
+		t.Fatal("the remedy (capture coverage, or restate the claim) is a decision, not an auto-fix")
+	}
+
+	got, _ := sctx.DB.GetClaimsByRun(sctx.Run.ID)
+	if got[0].ID != claim.ID || got[0].Verdict != claims.VerdictPlausible {
+		t.Fatalf("claim verdict = %q, want the skeptic's CONFIRMED capped to PLAUSIBLE", got[0].Verdict)
+	}
+
+	var f Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &f); err != nil {
+		t.Fatalf("unmarshal findings: %v", err)
+	}
+	var found bool
+	for _, it := range f.Items {
+		if strings.Contains(it.Description, "NO RUNTIME EVIDENCE") {
+			found = true
+			if it.Severity != "error" || it.Action != types.ActionAskUser {
+				t.Fatalf("runtime-evidence gap must be an ask-user error finding, got %+v", it)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no NO RUNTIME EVIDENCE finding in %+v", f.Items)
+	}
+}
+
+// TestVerifyStep_CoverageAuditFailureBlocksBehaviorRuntimePass: an audit that
+// could not run has not found the change runtime-verified. Fail closed — a
+// behavior claim in such a run is not allowed a runtime pass either.
+func TestVerifyStep_CoverageAuditFailureBlocksBehaviorRuntimePass(t *testing.T) {
+	ag := verdictAgent(claims.VerdictConfirmed, "clear")
+	sctx, evID, _ := seedVerifyContextWithoutRuntimeCoverage(t, ag)
+	sctx.WorkDir = t.TempDir() // not a git repo: the audit cannot diff
+	if _, err := sctx.DB.InsertClaim(claims.Claim{
+		RunID: sctx.Run.ID, Step: "test", Text: "login works on mobile",
+		Kind: claims.KindBehavior, Evidence: []string{evID},
+	}); err != nil {
+		t.Fatalf("insert claim: %v", err)
+	}
+
+	outcome, err := (&VerifyStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("verify execute: %v", err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("could-not-check must not become checked-and-clean for a behavior claim")
+	}
+	got, _ := sctx.DB.GetClaimsByRun(sctx.Run.ID)
+	if got[0].Verdict != claims.VerdictPlausible {
+		t.Fatalf("claim verdict = %q, want PLAUSIBLE (no runtime backing could be established)", got[0].Verdict)
+	}
+}
+
+// TestVerifyStep_RuntimeVerifiedHunkBacksBehaviorClaim is the other side of the
+// contract: when instrumentation actually executed the changed code, a behavior
+// claim passes untouched. Without this the gate above would just be a blanket
+// "behavior claims always park".
+func TestVerifyStep_RuntimeVerifiedHunkBacksBehaviorClaim(t *testing.T) {
+	ag := verdictAgent(claims.VerdictConfirmed, "the captured run shows it")
+	sctx, evID := seedVerifyContext(t, ag) // captures coverage over feature.txt:1
+	if _, err := sctx.DB.InsertClaim(claims.Claim{
+		RunID: sctx.Run.ID, Step: "test", Text: "the feature works",
+		Kind: claims.KindBehavior, Evidence: []string{evID},
+	}); err != nil {
+		t.Fatalf("insert claim: %v", err)
+	}
+
+	outcome, err := (&VerifyStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("verify execute: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("a runtime-verified behavior claim must pass, got findings %s", outcome.Findings)
+	}
+	got, _ := sctx.DB.GetClaimsByRun(sctx.Run.ID)
+	if got[0].Verdict != claims.VerdictConfirmed {
+		t.Fatalf("claim verdict = %q, want CONFIRMED", got[0].Verdict)
+	}
+	entries, _ := sctx.DB.GetCoverageEntriesByRun(sctx.Run.ID)
+	if len(entries) == 0 || entries[0].State != coverage.StateRuntimeVerified {
+		t.Fatalf("backfill should have promoted the executed hunk, got %+v", entries)
 	}
 }

@@ -228,3 +228,78 @@ func TestAdd(t *testing.T) {
 	}
 }
 `
+
+// TestRun_InstrumentationPromotesHunkNoGateRecorded: the ledger placeholder rows
+// for hunks no gate wrote down used to be inserted AFTER the backfill, so a hunk
+// the tests provably executed was still reported "unverified" purely because no
+// agent had recorded a row for it. Instrumentation truth is a property of the
+// run, not of whether an agent remembered to write the row — this is one root of
+// the "same hunk, three runs, three different states" drift.
+func TestRun_InstrumentationPromotesHunkNoGateRecorded(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	writeFile(t, filepath.Join(repo, "go.mod"), "module example.com/calc\n\ngo 1.25\n")
+	writeFile(t, filepath.Join(repo, "calc.go"), baseCalc)
+	runGit(t, repo, "add", ".")
+	runGit(t, repo, "commit", "-qm", "base")
+	base := headSHA(t, repo)
+
+	writeFile(t, filepath.Join(repo, "calc.go"), headCalc)
+	writeFile(t, filepath.Join(repo, "calc_test.go"), calcTest)
+	runGit(t, repo, "add", ".")
+	runGit(t, repo, "commit", "-qm", "add funcs")
+	head := headSHA(t, repo)
+
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	dbrepo, err := database.InsertRepo(repo, "https://example.com/calc.git", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := database.InsertRun(dbrepo.ID, "fm/calc", head, base)
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	keyPath := filepath.Join(t.TempDir(), "evidence.key")
+	key, err := evidence.LoadOrCreateKey(keyPath)
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	store, err := evidence.Open(evidence.DirForBranch(repo, "fm/calc"), key)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	profile := filepath.Join(repo, "cover.out")
+	if _, err := store.Coverage(context.Background(), evidence.CoverageOpts{
+		Label: "go unit tests", Argv: goTestArgv(profile), Format: coverage.FormatGo,
+		Dir: repo, RepoRoot: repo, CoverProfile: profile, Commit: head, RunID: run.ID, Branch: "fm/calc",
+	}); err != nil {
+		t.Fatalf("coverage collection: %v", err)
+	}
+
+	// No gate records ANY ledger row for the change.
+	res, err := Run(context.Background(), database, run.ID, repo, keyPath, base, head)
+	if err != nil {
+		t.Fatalf("covaudit.Run: %v", err)
+	}
+	if res.Report.RuntimeVerified == 0 {
+		t.Fatalf("the executed hunk must be runtime-verified from instrumentation alone, got %s", res.Report.String())
+	}
+	persisted, err := database.GetCoverageEntriesByRun(run.ID)
+	if err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	var promoted int
+	for _, e := range persisted {
+		if e.State == coverage.StateRuntimeVerified {
+			promoted++
+		}
+	}
+	if promoted == 0 {
+		t.Fatalf("promotion must be persisted, ledger = %+v", persisted)
+	}
+}

@@ -120,12 +120,13 @@ Adversarially verifies evidence-bound claims and audits the coverage ledger.
 - Uses independent skeptic prompts to adjudicate evidence-bound claims as `CONFIRMED`, `PLAUSIBLE`, or `REFUTED`. `verify.skeptics` sets how many run per claim; it defaults to `1`, so a single skeptic's verdict is final. Majority voting only applies when it is raised to `3` or more, at the cost of that many agent calls per claim
 - A skeptic that could not be evaluated at all — the agent failed to start, crashed, or returned no structured verdict — is not a verdict. The step fails with `verification did not run` rather than substituting a default one, so an unusable agent can never be mistaken for a passing gate
 - Runs the coverage audit over the changed hunks, coverage ledger, and captured instrumentation evidence
-- Backfills runtime truth from captured coverage, downgrading unsupported `runtime-verified` labels and inserting `unverified` rows for changed hunks no gate recorded
-- Surfaces coverage audit issues as non-parking findings; REFUTED claims are the verification failures that park the run
+- Backfills runtime truth from captured coverage: it inserts ledger rows for changed hunks no gate recorded, promotes every hunk captured instrumentation executed, and downgrades unsupported `runtime-verified` labels. A downgrade lands on `static-verified` only when the hunk cites captured executable static evidence, otherwise on `attested`
+- Requires a behavior-class claim (`behavior`, `regression-fixed`) to be backed by runtime evidence: at least one runtime-verified hunk, resolved against the hunks the claim names with `claim add --hunks`, or run-wide when it names none. `attested` is the ledger reporting that nothing executed the changed code, so it can never back a claim about what a user observes. Such a claim is capped at `PLAUSIBLE` — never `CONFIRMED` — whatever the skeptic said, and the gate parks. A coverage audit that could not run backs nothing either
+- Surfaces the remaining coverage audit issues as non-parking findings
 
-**Approval:** required when verify REFUTES a claim. Coverage-audit warnings are recorded for routing and dossier visibility but do not currently park the run by themselves.
+**Approval:** required when verify REFUTES a claim, and when a behavior-class claim has no runtime evidence behind it. Other coverage-audit warnings are recorded for routing and dossier visibility but do not park the run by themselves.
 
-**Auto-fix:** the agent receives the refutations and can fix code, correct claims, or recapture evidence inside the verify step. Fix commits use `no-mistakes(verify): <summary>`.
+**Auto-fix:** the agent receives the refutations and can fix code, correct claims, or recapture evidence inside the verify step. Fix commits use `no-mistakes(verify): <summary>`. A missing-runtime-evidence gate is deliberately NOT auto-fixable: its honest remedies are capturing instrumentation or restating the claim, and the pipeline does not let a fixer agent silently retire the claim that is failing the gate.
 
 **Default auto-fix limit:** `0`.
 
