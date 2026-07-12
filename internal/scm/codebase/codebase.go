@@ -228,18 +228,41 @@ func (h *Host) itemToPR(mr mrListItem) *scm.PR {
 	return &scm.PR{Number: number, URL: prURL}
 }
 
-// mrCreateResponse covers the create/get payload. `mr get` nests the MR under
-// data.merge_request with CapitalCase fields; `mr status` uses lowercase. Parse
-// both so the created PR's number and URL are recovered whichever the CLI emits.
+// mrCreateMR is the MR object inside a create/get payload. bytedcli is
+// inconsistent about field casing across commands, so both spellings are parsed.
+type mrCreateMR struct {
+	Number      int    `json:"Number"`
+	NumberLower int    `json:"number"`
+	URL         string `json:"URL"`
+	URLLower    string `json:"url"`
+}
+
+// mrCreateResponse covers the create/get payload. The *wrapper key* casing also
+// drifts per command, and Go's case-insensitive field match does NOT bridge the
+// two spellings because of the underscore: a `json:"merge_request"` tag silently
+// parses a `data.MergeRequest` payload as a zero value. Observed against
+// bytedcli on code.byted.org:
+//
+//	mr create → data.MergeRequest  (CapitalCase)
+//	mr get    → data.merge_request (snake_case, CapitalCase fields)
+//	mr status → data.merge_request (snake_case, lowercase fields)
+//
+// So accept BOTH wrapper keys rather than betting on one: guessing this shape
+// instead of capturing it is what let a successfully created MR be reported as a
+// hard failure, which failed the run and meant the `ci` step never ran.
 type mrCreateResponse struct {
 	Data struct {
-		MergeRequest struct {
-			Number      int    `json:"Number"`
-			NumberLower int    `json:"number"`
-			URL         string `json:"URL"`
-			URLLower    string `json:"url"`
-		} `json:"merge_request"`
+		MergeRequest        mrCreateMR `json:"merge_request"`
+		MergeRequestCapital mrCreateMR `json:"MergeRequest"`
 	} `json:"data"`
+}
+
+// mr returns whichever wrapper key the CLI actually populated.
+func (r mrCreateResponse) mr() mrCreateMR {
+	if r.Data.MergeRequest != (mrCreateMR{}) {
+		return r.Data.MergeRequest
+	}
+	return r.Data.MergeRequestCapital
 }
 
 func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PRContent) (*scm.PR, error) {
@@ -278,7 +301,7 @@ func parseCreatedMR(out []byte) (number, prURL string) {
 	if json.Unmarshal(trimmed, &resp) != nil {
 		return "", ""
 	}
-	mr := resp.Data.MergeRequest
+	mr := resp.mr()
 	n := mr.Number
 	if n == 0 {
 		n = mr.NumberLower
