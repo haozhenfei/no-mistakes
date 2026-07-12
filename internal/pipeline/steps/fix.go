@@ -77,10 +77,13 @@ func (s *FixStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, er
 		return nil, err
 	}
 	if sctx.Run.HeadSHA == previousHead {
-		// The agent produced nothing. Pushing on would re-open the same PR
-		// with the same failure and derive the same watch run: a loop that
-		// burns an agent invocation per lap and changes nothing. Park instead
-		// and let a person look.
+		// The agent produced nothing: commitAgentFixes advances the head for
+		// both shapes of agent output - uncommitted edits it commits, and
+		// commits the agent made itself, which is what this step's prompt asks
+		// for - so an unmoved head means the worktree really is untouched.
+		// Pushing on would re-open the same PR with the same failure and derive
+		// the same watch run: a loop that burns an agent invocation per lap and
+		// changes nothing. Park instead and let a person look.
 		sctx.Log("fix produced no changes - the findings need a human")
 		findings, _ := json.Marshal(Findings{
 			Summary: "The fix agent produced no changes for the findings carried over from the watched PR. They need a person.",
