@@ -123,7 +123,7 @@ func (m *RunManager) launchWatchRun(ctx context.Context, repo *db.Repo, run *db.
 			}
 			withQA = false
 			workDir = m.watchWorkDir(repo)
-			execSteps = steps.WatchSteps()
+			execSteps = m.watchSteps(nil)
 		} else {
 			ag = resolved
 		}

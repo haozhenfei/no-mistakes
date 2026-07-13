@@ -2,7 +2,7 @@ package daemon
 
 import (
 	"context"
-
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -279,9 +279,20 @@ func TestQAOnlyGateRunKeepsThePRWatched(t *testing.T) {
 	mgr, p, d := newTestManager(t)
 	repo, headSHA := setupTestGitRepo(t, p, d, "repo-qa-keeps-watch")
 
-	watchStarted := make(chan struct{}, 2)
+	// Each watcher gets its OWN start signal: mockSlowStep closes the channel it
+	// is given, and this test starts two watchers (the original, then the
+	// replacement the qa-only run hands off to). Sharing one channel would panic
+	// the second run on `close of closed channel` - which the daemon recovers into
+	// a failed run, and the test would then be measuring its own bug.
+	firstStarted := make(chan struct{})
+	replacementStarted := make(chan struct{})
+	var watchers atomic.Int32
 	mgr.SetWatchStepFactory(func(selection []types.StepName) []pipeline.Step {
-		return []pipeline.Step{&mockSlowStep{name: types.StepWatch, started: watchStarted}}
+		started := firstStarted
+		if watchers.Add(1) > 1 {
+			started = replacementStarted
+		}
+		return []pipeline.Step{&mockSlowStep{name: types.StepWatch, started: started}}
 	})
 	mgr.steps = func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepPush}}
@@ -301,7 +312,7 @@ func TestQAOnlyGateRunKeepsThePRWatched(t *testing.T) {
 		t.Fatalf("start watch run: %v", err)
 	}
 	select {
-	case <-watchStarted:
+	case <-firstStarted:
 	case <-time.After(10 * time.Second):
 		t.Fatal("watch run never started")
 	}
@@ -319,6 +330,11 @@ func TestQAOnlyGateRunKeepsThePRWatched(t *testing.T) {
 	// The replacement watcher inherits the PR from the branch's last run that
 	// reached one - the qa-only run skipped the pr step, so it has none itself -
 	// and it carries the QA node.
+	select {
+	case <-replacementStarted:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the qa-only run left the branch's PR with no live watcher")
+	}
 	replacement := waitForActiveWatchRun(t, d, repo.ID, "main", watchID)
 	if !types.SelectsQA(replacement.OnlySteps) {
 		t.Fatalf("the replacement watcher has no QA node (only_steps = %v); --only qa did nothing", replacement.OnlySteps)
