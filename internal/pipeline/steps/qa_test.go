@@ -450,3 +450,73 @@ func TestQAStep_RefusesWhenTheCommitIsNotInThePR(t *testing.T) {
 		t.Fatal("QA ran the agent against a commit the PR does not have")
 	}
 }
+
+// A QA report is a statement about ONE commit, and the PR's head moves after it
+// is opened (a fix round for failing CI, a suggestion applied in the UI). A
+// report that does not name its commit is silently re-read as a statement about
+// whatever is on the PR when someone happens to read it - which is how a verdict
+// about code that no longer exists ends up vouching for code nobody ran.
+func TestQAStep_ThePublishedReportNamesTheCommitItVerified(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	report := `{"verdict":"FAIL","summary":"the new page 500s","achieves_goal":"No",
+		"report_markdown":"## QA Report: FAIL\n\nOpening /settings returns HTTP 500.","issues":[]}`
+	sctx := qaContext(t, qaAgentReturning(t, report, nil), dir, baseSHA, headSHA)
+	env, log := fakeQAGH(t, "https://github.com/test/repo/pull/7")
+	sctx.Env = env
+	setRunPRURL(t, sctx, "https://github.com/test/repo/pull/7")
+
+	if _, err := (&QAStep{}).Execute(sctx); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	posted := ghLog(t, log)
+	if !strings.Contains(posted, headSHA[:12]) {
+		t.Fatalf("the published QA report does not name the commit it verified (%s); gh log:\n%s", headSHA[:12], posted)
+	}
+	if !strings.Contains(posted, "FAIL") {
+		t.Fatalf("the stamp does not carry the verdict; gh log:\n%s", posted)
+	}
+}
+
+// The verdict has to outlive the step, on the run row, next to the head SHA it is
+// about. That pair is the whole basis on which a later watch run can tell the PR
+// that its QA verdict predates the code about to merge - and a PASS is never
+// posted as a comment, so without this it would exist nowhere at all.
+func TestQAStep_TheVerdictIsRecordedOnTheRunWithItsCommit(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := qaContext(t, qaAgentReturning(t, qaPassReport, nil), dir, baseSHA, headSHA)
+	env, _ := fakeQAGH(t, "https://github.com/test/repo/pull/7")
+	sctx.Env = env
+	setRunPRURL(t, sctx, "https://github.com/test/repo/pull/7")
+
+	if _, err := (&QAStep{}).Execute(sctx); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.QAVerdict == nil || *run.QAVerdict != "PASS" {
+		t.Fatalf("runs.qa_verdict = %v, want PASS", run.QAVerdict)
+	}
+	if run.HeadSHA != headSHA {
+		t.Fatalf("the verdict is recorded against %s, not the commit QA exercised (%s)", run.HeadSHA, headSHA)
+	}
+
+	// And it is findable as "the branch's QA verdict", which is what the watch
+	// step's staleness check reads.
+	latest, err := sctx.DB.LatestQAVerdict(sctx.Repo.ID, sctx.Run.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest == nil || latest.ID != sctx.Run.ID {
+		t.Fatalf("LatestQAVerdict() = %v, want the run that just QA'd", latest)
+	}
+}

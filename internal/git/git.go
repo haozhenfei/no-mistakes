@@ -188,6 +188,33 @@ func DiffNameOnly(ctx context.Context, dir, base, head string) ([]string, error)
 	return files, nil
 }
 
+// DiffNameOnlyIgnoringWhitespace returns the files whose diff between base and
+// head survives whitespace normalization - i.e. the files a formatter pass did
+// NOT merely reflow. Files whose entire change is whitespace are omitted.
+//
+// It reads --numstat rather than --name-only on purpose: `git diff -w
+// --name-only` still lists a file whose diff is entirely whitespace, so it
+// cannot answer this question. --numstat drops the file once -w empties its
+// diff, which is exactly the signal wanted. --no-renames keeps the third field a
+// plain path instead of a rename arrow.
+func DiffNameOnlyIgnoringWhitespace(ctx context.Context, dir, base, head string) ([]string, error) {
+	out, err := Run(ctx, dir, "diff", "-w", "--ignore-blank-lines", "--no-renames", "--numstat", base+".."+head)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "\t")
+		if len(fields) < 3 {
+			continue
+		}
+		if file := strings.TrimSpace(fields[len(fields)-1]); file != "" {
+			files = append(files, file)
+		}
+	}
+	return files, nil
+}
+
 // CommitTime returns the committer timestamp for a SHA in UTC.
 func CommitTime(ctx context.Context, dir, sha string) (time.Time, error) {
 	out, err := Run(ctx, dir, "show", "-s", "--format=%ct", sha)

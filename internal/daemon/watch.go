@@ -19,17 +19,20 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// startWatchRun launches a poller over the PR a gate run opened.
+// startWatchRun launches the PR's confirm phase: a poller over the PR a gate run
+// opened, plus - when the caller selected qa - a QA pass running concurrently
+// with it.
 //
-// The whole point of the kind split shows up here as what this function does
-// NOT do: it adds no worktree, copies no git identity, resolves no agent
-// binary. A watch run's entire state is the PR, which the SCM server owns, so
-// the daemon holds nothing on its behalf and can throw the run away and rebuild
-// it at any time (see rearmWatchRuns).
+// The run inherits the parent gate run's PR URL, head SHA, and step selection,
+// and points parent_run_id back at it. The selection is what decides the shape:
 //
-// parent is the run whose pr step produced the PR - a gate run on the first
-// handoff. The watch run inherits its PR URL and head SHA and points
-// parent_run_id back at it.
+//   - no qa: the run is a pure poller. It adds no worktree and holds nothing
+//     local, so it can be thrown away and rebuilt at any time.
+//   - qa: the run also owns a worktree, because a QA pass has to boot the product
+//     from real code. It still writes nothing anyone else can observe - no ref, no
+//     push, no PR content beyond a comment - so it stays disposable in the way
+//     that matters; and it is resumable, so a daemon restart re-uses a QA pass
+//     that already finished instead of paying for it again (see rearmWatchRuns).
 func (m *RunManager) startWatchRun(ctx context.Context, repo *db.Repo, parent *db.Run) (string, error) {
 	if m.shuttingDown.Load() {
 		return "", fmt.Errorf("daemon is shutting down")
@@ -50,37 +53,88 @@ func (m *RunManager) startWatchRun(ctx context.Context, repo *db.Repo, parent *d
 	// watch run, and a gate run derives the watch run that would then kill it.
 	m.cancelActiveRuns(repo.ID, branch, types.RunKindWatch)
 
+	// The PR URL is written WITH the row, not by a follow-up UPDATE: a watch run
+	// that briefly exists with no PR URL is a watch run that looks - to a reader,
+	// or to crash recovery - like it is watching nothing.
 	run, err := m.db.InsertRunWithOptions(repo.ID, branch, parent.HeadSHA, parent.BaseSHA, db.RunOptions{
 		Kind:        types.RunKindWatch,
 		ParentRunID: parent.ID,
+		PRURL:       strings.TrimSpace(*parent.PRURL),
+		// The selection travels with the handoff. It is what tells this run - and
+		// any later recovery of it - that it carries a QA node.
+		OnlySteps: parent.OnlySteps,
 	})
 	if err != nil {
 		return "", fmt.Errorf("create watch run: %w", err)
 	}
-	if err := m.db.UpdateRunPRURL(run.ID, *parent.PRURL); err != nil {
-		return "", fmt.Errorf("record watch run PR: %w", err)
-	}
-	prURL := *parent.PRURL
-	run.PRURL = &prURL
 
-	m.launchWatchRun(ctx, repo, run)
+	if err := m.launchWatchRun(ctx, repo, run, false); err != nil {
+		if dbErr := m.db.UpdateRunError(run.ID, err.Error()); dbErr != nil {
+			slog.Error("failed to record watch run start failure", "run_id", run.ID, "error", dbErr)
+		}
+		return "", err
+	}
 	return run.ID, nil
 }
 
 // launchWatchRun wires an executor to an already-created watch run row and runs
-// it in the background. It is shared by the first handoff and by crash re-arm.
-func (m *RunManager) launchWatchRun(ctx context.Context, repo *db.Repo, run *db.Run) {
+// it in the background. It is shared by the first handoff and by crash re-arm
+// (which passes resume=true, so a QA node that already finished is reused rather
+// than paid for a second time).
+func (m *RunManager) launchWatchRun(ctx context.Context, repo *db.Repo, run *db.Run, resume bool) error {
 	cfg := m.loadWatchConfig(ctx, repo, run)
-	execSteps := m.watchSteps()
+	execSteps := m.watchSteps(run.OnlySteps)
+	withQA := types.SelectsQA(run.OnlySteps)
 
-	// A watch run never invokes an agent - it reads the PR and decides. Giving
-	// it a no-op agent means a machine with no agent binary installed can still
-	// watch a PR it already opened, and means a watch run cannot silently start
-	// editing code.
+	// Only a run with a QA node needs a worktree, and only because QA has to boot
+	// the product. A pure poller still gets none: there is nothing for it to read
+	// off disk.
+	gateDir := m.paths.RepoDir(repo.ID)
+	workDir := m.watchWorkDir(repo)
+	if withQA {
+		wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
+		if err := ensureWatchWorktree(ctx, gateDir, wtDir, run.HeadSHA); err != nil {
+			return fmt.Errorf("create watch worktree: %w", err)
+		}
+		if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
+			_ = git.WorktreeRemove(context.Background(), gateDir, wtDir)
+			return fmt.Errorf("configure watch worktree git identity: %w", err)
+		}
+		workDir = wtDir
+	}
+
+	// A watch run's poll node never invokes an agent, and a run with no QA node
+	// therefore needs none: giving it a no-op agent means a machine with no agent
+	// binary installed can still watch a PR it already opened, and means the poll
+	// can never silently start editing code. A QA node does need a real agent.
+	//
+	// If one cannot be resolved, the QA node is dropped and the run watches the PR
+	// anyway. Failing the whole run instead would answer "QA could not start" with
+	// "this PR is no longer being watched" - failing CI would derive no fix round
+	// and nothing would escalate - which is a far worse outcome than a missing QA
+	// pass, and it is the exact failure the gate/watch split exists to remove.
 	ag := agent.NewNoop()
+	if withQA && !steps.IsDemoMode() {
+		resolved, err := newPipelineAgent(ctx, cfg)
+		if err != nil {
+			slog.Error("no agent available for the QA node; watching the PR without it", "run_id", run.ID, "error", err)
+			if wtErr := m.removeWatchWorktree(gateDir, repo, run); wtErr != nil {
+				slog.Warn("failed to remove the unused watch worktree", "run_id", run.ID, "error", wtErr)
+			}
+			withQA = false
+			workDir = m.watchWorkDir(repo)
+			execSteps = steps.WatchSteps()
+		} else {
+			ag = resolved
+		}
+	}
 
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	// The QA node and the poll node are one concurrent phase: the PR is watched
+	// from the moment it opens, and the run stays alive - holding its worktree -
+	// until both have converged.
+	executor.SetParallelPhase(types.WatchStepsFor(run.OnlySteps))
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[run.ID] = executor
@@ -95,6 +149,7 @@ func (m *RunManager) launchWatchRun(ctx context.Context, repo *db.Repo, run *db.
 		"kind":        string(types.RunKindWatch),
 		"branch_role": telemetryBranchRole(run.Branch, repo.DefaultBranch),
 		"step_count":  len(execSteps),
+		"qa":          withQA,
 	})
 
 	m.wg.Add(1)
@@ -115,6 +170,12 @@ func (m *RunManager) launchWatchRun(ctx context.Context, repo *db.Repo, run *db.
 			cancel(nil)
 			_ = ag.Close()
 			m.closeSubscribers(run.ID)
+			// The worktree is released as it was created: a watch run makes no
+			// commits, and adopting anything a QA agent left behind would move the
+			// branch ref on the strength of a run that is not allowed to change code.
+			if wtErr := m.removeWatchWorktree(gateDir, repo, run); wtErr != nil {
+				slog.Warn("failed to remove watch worktree", "run_id", run.ID, "error", wtErr)
+			}
 			m.mu.Lock()
 			delete(m.executors, run.ID)
 			delete(m.cancels, run.ID)
@@ -122,7 +183,12 @@ func (m *RunManager) launchWatchRun(ctx context.Context, repo *db.Repo, run *db.
 			m.mu.Unlock()
 		}()
 
-		execErr := executor.Execute(runCtx, run, repo, m.watchWorkDir(repo))
+		var execErr error
+		if resume {
+			execErr = executor.ResumeFrom(runCtx, run, repo, workDir)
+		} else {
+			execErr = executor.Execute(runCtx, run, repo, workDir)
+		}
 		if execErr != nil {
 			slog.Error("watch run failed", "run_id", run.ID, "error", execErr)
 		}
@@ -134,12 +200,47 @@ func (m *RunManager) launchWatchRun(ctx context.Context, repo *db.Repo, run *db.
 			"status":      string(run.Status),
 			"duration_ms": time.Since(startedAt).Milliseconds(),
 			"step_count":  len(execSteps),
+			"qa":          withQA,
 		})
-		if execErr != nil {
+		// The poll's verdict is acted on whenever the poll reached one, even if the
+		// run as a whole failed. The two nodes are independent: a QA pass that could
+		// not boot the product must not swallow a "CI is failing" verdict the poll
+		// already reached, or a failing environment would quietly cost the PR its
+		// fix round. A cancelled run reaches no verdict at all, so nothing is acted
+		// on there.
+		outcome := executor.WatchOutcome()
+		if outcome == nil || runCtx.Err() != nil {
 			return
 		}
-		m.resolveWatchOutcome(repo, run, executor.WatchOutcome())
+		if execErr != nil {
+			slog.Warn("acting on the poll's verdict even though the run failed", "run_id", run.ID, "verdict", outcome.Reason, "error", execErr)
+		}
+		m.resolveWatchOutcome(repo, run, outcome)
 	}()
+	return nil
+}
+
+// ensureWatchWorktree creates the run's worktree, replacing a stale directory
+// left by a previous incarnation of the same run (a re-armed run reuses its run
+// ID, and therefore its worktree path).
+func ensureWatchWorktree(ctx context.Context, gateDir, wtDir, headSHA string) error {
+	if _, err := os.Stat(wtDir); err == nil {
+		if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
+			if err := os.RemoveAll(wtDir); err != nil {
+				return fmt.Errorf("remove stale watch worktree: %w", err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect watch worktree: %w", err)
+	}
+	return git.WorktreeAdd(ctx, gateDir, wtDir, headSHA)
+}
+
+func (m *RunManager) removeWatchWorktree(gateDir string, repo *db.Repo, run *db.Run) error {
+	if !types.SelectsQA(run.OnlySteps) {
+		return nil
+	}
+	return git.WorktreeRemove(context.Background(), gateDir, m.paths.WorktreeDir(repo.ID, run.ID))
 }
 
 // resolveWatchOutcome acts on the verdict a finished watch run reached.
@@ -314,16 +415,22 @@ func (m *RunManager) resumableWatchRuns() []*db.Run {
 
 // rearmWatchRuns restarts the watch runs that were live when the daemon died.
 //
-// This is the direct dividend of a watch run holding no local state: there is
-// nothing to reconstruct and nothing that can be lost, so the right recovery is
-// not to mark the run `interrupted` and wait for a human to resume it - it is to
-// ask the PR again. A watch run that a crash turned into an `interrupted` row is
-// a PR nobody is watching, which is the failure this whole split exists to
-// remove.
+// A watch run that a crash turned into an `interrupted` row is a PR nobody is
+// watching, which is the failure this whole split exists to remove - so the right
+// recovery is not to wait for a human, it is to ask the PR again.
 //
-// The dead run's step rows are dropped first: the re-armed run re-executes from
-// nothing, and the half-written rows of the interrupted poll would otherwise sit
-// alongside the fresh ones.
+// It RESUMES rather than restarts. The poll node is a pure function of the PR, so
+// re-running it costs one HTTP call and loses nothing. The QA node is not: it
+// costs ~25 minutes and ~400k tokens, and it may well have finished before the
+// daemon died (a laptop that sleeps, an update that restarts the daemon). Its step
+// row records the head SHA and config it validated, so the ordinary resume rules
+// (pipeline.ResumeStepReusable) reuse a completed QA pass at the same head and
+// re-execute only the poll. Dropping the step rows - which this used to do - would
+// throw that away and re-run QA on every restart.
+//
+// A QA node that had NOT finished (still running, or parked at its gate) is not
+// reusable and does run again. That is the honest outcome: a QA pass with no
+// recorded verdict verified nothing.
 func (m *RunManager) rearmWatchRuns(ctx context.Context, runs []*db.Run) []string {
 	var rearmed []string
 	for _, run := range runs {
@@ -332,17 +439,16 @@ func (m *RunManager) rearmWatchRuns(ctx context.Context, runs []*db.Run) []strin
 			slog.Warn("watch run cannot be re-armed", "run_id", run.ID, "error", err)
 			continue
 		}
-		if err := m.db.DeleteStepsForRun(run.ID); err != nil {
-			slog.Warn("watch run cannot be re-armed", "run_id", run.ID, "error", err)
-			continue
-		}
 		if err := m.db.ClearRunAwaitingAgent(run.ID); err != nil {
 			slog.Warn("failed to clear parked marker before re-arming watch run", "run_id", run.ID, "error", err)
 		}
 		run.AwaitingAgentSince = nil
-		m.launchWatchRun(ctx, repo, run)
+		if err := m.launchWatchRun(ctx, repo, run, true); err != nil {
+			slog.Warn("watch run cannot be re-armed", "run_id", run.ID, "error", err)
+			continue
+		}
 		rearmed = append(rearmed, run.ID)
-		slog.Info("re-armed watch run after restart", "run_id", run.ID, "pr_url", derefString(run.PRURL))
+		slog.Info("re-armed watch run after restart", "run_id", run.ID, "pr_url", derefString(run.PRURL), "qa", types.SelectsQA(run.OnlySteps))
 	}
 	return rearmed
 }
@@ -388,11 +494,14 @@ func (m *RunManager) loadWatchConfig(ctx context.Context, repo *db.Repo, run *db
 	return config.Merge(globalCfg, config.EffectiveRepoConfig(repoCfg, nil, false))
 }
 
-func (m *RunManager) watchSteps() []pipeline.Step {
+// watchSteps returns the confirm phase's nodes for this selection. The test seam
+// replaces the whole set, so a test can substitute a fake poller and a fake QA
+// pass together.
+func (m *RunManager) watchSteps(selection []types.StepName) []pipeline.Step {
 	if m.watchStepFactory != nil {
-		return m.watchStepFactory()
+		return m.watchStepFactory(selection)
 	}
-	return steps.WatchSteps()
+	return steps.WatchStepsFor(selection)
 }
 
 func derefString(s *string) string {

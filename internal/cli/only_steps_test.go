@@ -135,3 +135,68 @@ func TestStepSelection_OnlySurvivesThePushOptionRoundTrip(t *testing.T) {
 		t.Fatalf("parseOnlyPushOptions(no selection) = %v, want none", empty)
 	}
 }
+
+// --with is additive, and it accepts on-demand steps only: every other step is
+// already in the pipeline, so naming one here would silently do nothing.
+func TestParseWithSteps(t *testing.T) {
+	got, err := parseWithSteps("qa")
+	if err != nil {
+		t.Fatalf("--with qa: %v", err)
+	}
+	if len(got) != 1 || got[0] != types.StepQA {
+		t.Fatalf("--with qa = %v, want [qa]", got)
+	}
+
+	if _, err := parseWithSteps("review"); err == nil {
+		t.Fatal("--with review was accepted; review is already part of the pipeline")
+	}
+	if _, err := parseWithSteps("watch"); err == nil {
+		t.Fatal("--with watch was accepted; a watch run is derived, never requested")
+	}
+	if _, err := parseWithSteps("quality-assurance"); err == nil {
+		t.Fatal("--with quality-assurance was accepted; it is not a step")
+	}
+}
+
+// --with composes with both --skip and --only: it answers a different question
+// ("also do this") from either of them.
+func TestParseStepSelectionWith_ComposesWithSkipAndOnly(t *testing.T) {
+	sel, err := parseStepSelectionWith("lint", "", "qa")
+	if err != nil {
+		t.Fatalf("--skip lint --with qa: %v", err)
+	}
+	if len(sel.skip) != 1 || sel.skip[0] != types.StepLint || len(sel.with) != 1 || sel.with[0] != types.StepQA {
+		t.Fatalf("selection = %+v, want skip=[lint] with=[qa]", sel)
+	}
+	if sel.empty() {
+		t.Fatal("a selection carrying --with reports itself as the default pipeline")
+	}
+
+	sel, err = parseStepSelectionWith("", "review", "qa")
+	if err != nil {
+		t.Fatalf("--only review --with qa: %v", err)
+	}
+	if len(sel.only) != 1 || sel.only[0] != types.StepReview || len(sel.with) != 1 {
+		t.Fatalf("selection = %+v, want only=[review] with=[qa]", sel)
+	}
+
+	// The push transport must carry it, or a run started by `axi run` would lose
+	// the selection on its way to the daemon.
+	opts := sel.pushOptions()
+	found := false
+	for _, opt := range opts {
+		if opt == "no-mistakes.with=qa" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("push options = %v, want one carrying no-mistakes.with=qa", opts)
+	}
+	parsed, err := parseWithPushOptions(opts)
+	if err != nil {
+		t.Fatalf("parse push options: %v", err)
+	}
+	if len(parsed) != 1 || parsed[0] != types.StepQA {
+		t.Fatalf("parsed with-steps = %v, want [qa]", parsed)
+	}
+}

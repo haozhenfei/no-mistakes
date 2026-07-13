@@ -157,7 +157,7 @@ func TestGateRunDerivesWatchRunOnPR(t *testing.T) {
 		return []pipeline.Step{&mockPassStep{name: types.StepPush}, &mockPRStep{prURL: testPRURL}}
 	}
 	seen := make(chan *db.Run, 1)
-	mgr.SetWatchStepFactory(func() []pipeline.Step {
+	mgr.SetWatchStepFactory(func(_ []types.StepName) []pipeline.Step {
 		return []pipeline.Step{&mockWatchStep{action: pipeline.WatchConverged, seen: seen}}
 	})
 
@@ -217,7 +217,7 @@ func TestGateRunWithoutPRDerivesNoWatchRun(t *testing.T) {
 	mgr.steps = func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepPush}}
 	}
-	mgr.SetWatchStepFactory(func() []pipeline.Step {
+	mgr.SetWatchStepFactory(func(_ []types.StepName) []pipeline.Step {
 		return []pipeline.Step{&mockWatchStep{action: pipeline.WatchConverged}}
 	})
 
@@ -248,7 +248,7 @@ func TestWatchRunDerivesFixGateRun(t *testing.T) {
 	repo, headSHA := setupTestGitRepo(t, p, d, "repo-fix")
 
 	findings := `{"findings":[{"severity":"error","description":"CI check failing: build","action":"auto-fix"}],"summary":"CI failing"}`
-	mgr.SetWatchStepFactory(func() []pipeline.Step {
+	mgr.SetWatchStepFactory(func(_ []types.StepName) []pipeline.Step {
 		return []pipeline.Step{&mockWatchStep{action: pipeline.WatchFix, findings: findings}}
 	})
 	fixRan := make(chan *db.Run, 1)
@@ -406,7 +406,7 @@ func TestParkedWatchRunFixResponseDerivesGateRun(t *testing.T) {
 		`{"id":"F1","severity":"warning","description":"Unresolved review thread from alice: this drops the error","action":"ask-user"},` +
 		`{"id":"F2","severity":"warning","description":"Unresolved review thread from bot: nit","action":"ask-user"}` +
 		`],"summary":"2 unresolved review threads"}`
-	mgr.SetWatchStepFactory(func() []pipeline.Step {
+	mgr.SetWatchStepFactory(func(_ []types.StepName) []pipeline.Step {
 		return []pipeline.Step{&mockWatchStep{action: pipeline.WatchEscalate, findings: findings, park: true}}
 	})
 	fixRan := make(chan *db.Run, 1)

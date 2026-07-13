@@ -76,6 +76,12 @@ type PushReceivedParams struct {
 	// RunManager.startRun). SkipSteps and OnlySteps are mutually exclusive; the
 	// CLI rejects both together.
 	OnlySteps []types.StepName `json:"only_steps,omitempty"`
+	// WithSteps, when non-empty, names the on-demand steps to add to an
+	// otherwise normal run (--with qa). It is additive, not exclusive: it
+	// composes with SkipSteps and with OnlySteps rather than replacing either.
+	// The daemon merges it with OnlySteps into the run's persisted selection
+	// (runs.only_steps), which is what makes the PR handoff derive a QA run.
+	WithSteps []types.StepName `json:"with_steps,omitempty"`
 	Intent    string           `json:"intent,omitempty"`
 }
 
@@ -121,6 +127,9 @@ type RerunParams struct {
 	// OnlySteps mirrors PushReceivedParams.OnlySteps: an exclusive selection
 	// that the daemon resolves into the new run's skip set.
 	OnlySteps []types.StepName `json:"only_steps,omitempty"`
+	// WithSteps mirrors PushReceivedParams.WithSteps: the on-demand steps to
+	// add to the new run.
+	WithSteps []types.StepName `json:"with_steps,omitempty"`
 	Intent    string           `json:"intent,omitempty"`
 }
 

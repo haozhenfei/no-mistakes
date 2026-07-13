@@ -25,8 +25,18 @@ CREATE TABLE IF NOT EXISTS runs (
     parked_ms            INTEGER,
     skip_steps           TEXT,
     only_steps           TEXT,
+    qa_verdict           TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS qa_notices (
+    id         TEXT PRIMARY KEY,
+    pr_url     TEXT NOT NULL,
+    qa_run_id  TEXT NOT NULL,
+    head_sha   TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(pr_url, qa_run_id, head_sha)
 );
 
 CREATE TABLE IF NOT EXISTS step_results (
@@ -169,6 +179,12 @@ var migrationStatements = []string{
 	// only_steps says "this run selected nothing", which is the truth for every
 	// legacy row and every ordinary run.
 	`ALTER TABLE runs ADD COLUMN only_steps TEXT`,
+	// qa_verdict is the QA run's four-value verdict (PASS / PASS_WITH_ISSUES /
+	// FAIL / PARTIAL). It lives on the run row rather than only inside the step's
+	// findings blob because the watch run has to read it later, from a different
+	// run, to say "QA verified <sha> and said PASS, but the head has moved since".
+	// It is NULL on every run that is not a QA run.
+	`ALTER TABLE runs ADD COLUMN qa_verdict TEXT`,
 	// Every row written before the gate/watch split is a gate run: the
 	// pre-split pipeline had no other kind. The NOT NULL DEFAULT backfills
 	// them in place, so an existing database keeps loading unchanged.

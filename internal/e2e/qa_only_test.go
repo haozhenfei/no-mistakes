@@ -21,18 +21,21 @@ const qaPromptMarker = "PHASE 3 - Exercise the changed behavior."
 // TestQAStepIsOnDemand pins the on-demand contract through the real daemon and a
 // real gate push:
 //
-//   - an ordinary push runs the pipeline exactly as before: no qa step in it, no
-//     QA agent invocation, nothing paid for a step nobody asked for;
-//   - `axi run --only qa` runs the qa step and skips every other one, and the
-//     selection lands on the run row, where a resume reads it.
+//   - an ordinary push runs the gate pipeline exactly as before: no qa step in
+//     it, no QA agent invocation, nothing paid for a step nobody asked for;
+//   - qa is not a gate step at all. Selecting it (`--only qa`, `--with qa`) puts
+//     a QA node in the post-PR watch run, where it runs concurrently with the CI
+//     poll - so the gate run's own step list never grows a qa row, whatever the
+//     selection says. What lands on the gate run is the SELECTION (only_steps)
+//     plus the complementary skip set, which is what the handoff and a later
+//     resume read back.
 //
-// What the qa step then does with the PR - reads runs.pr_url, falls back to
-// asking the host, fails when there is no PR, and carries the repo's
-// qa.instructions into its prompt - is covered by the step's own tests in
-// internal/pipeline/steps, which fake the PR host directly. A PR host cannot be
-// faked inside the daemon here: the daemon rebuilds its PATH from the login
-// shell, and the harness's stub bin dir does not survive that on every machine
-// (the same reason TestForkRouting and TestPRHandsOffToWatchRun fail locally).
+// The QA node itself cannot be exercised here: it needs a PR, and a PR host
+// cannot be faked inside the daemon (the daemon rebuilds its PATH from the login
+// shell, and the harness's stub bin dir does not survive that on every machine -
+// the same reason TestForkRouting and TestPRHandsOffToWatchRun fail locally). The
+// node's behavior is covered by internal/pipeline/steps (QA report, head-SHA
+// stamp, staleness) and internal/daemon (the two nodes running in parallel).
 func TestQAStepIsOnDemand(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: qaScenario(t)})
 
@@ -74,31 +77,26 @@ func TestQAStepIsOnDemand(t *testing.T) {
 		t.Fatalf("gate run status = %s, error = %v\nsteps:\n%s", gate.Status, deref(gate.Error), dumpSteps(gateSteps))
 	}
 
-	// 2. --only qa runs the qa step and skips every other one. Whether that run
-	// then succeeds depends on a reachable PR host, which is not what this
-	// assertion is about: the contract here is the step SELECTION.
+	// 2. --only qa records the selection and runs no gate step. The QA pass itself
+	// happens in the watch run this hands off to, which needs a PR host - not what
+	// this assertion is about. The contract here is the SELECTION.
 	out, _ := h.Run("axi", "run", "--only", "qa", "--intent", "QA the branch against its open PR")
 
 	qaRun := latestRunForBranch(t, h, database, branch, gate.ID)
+	if !containsStepName(qaRun.OnlySteps, types.StepQA) {
+		t.Fatalf("--only qa did not record the selection on the run (only_steps = %v)\naxi output:\n%s", qaRun.OnlySteps, out)
+	}
 	qaSteps, err := database.GetStepsByRun(qaRun.ID)
 	if err != nil {
 		t.Fatalf("get qa run steps: %v", err)
 	}
-	if len(qaSteps) == 0 {
-		t.Fatalf("--only qa produced a run with no steps\naxi output:\n%s", out)
-	}
-	ran := map[types.StepName]types.StepStatus{}
 	for _, sr := range qaSteps {
-		if sr.Status != types.StepStatusSkipped {
-			ran[sr.StepName] = sr.Status
+		if sr.StepName == types.StepQA {
+			t.Fatalf("qa is not a gate step, but the gate run carries a qa row\nsteps:\n%s", dumpSteps(qaSteps))
 		}
-	}
-	if _, ok := ran[types.StepQA]; !ok {
-		t.Fatalf("--only qa did not run the qa step\nsteps:\n%s\naxi output:\n%s", dumpSteps(qaSteps), out)
-	}
-	delete(ran, types.StepQA)
-	if len(ran) != 0 {
-		t.Fatalf("--only qa also ran %v; every other step must be skipped\nsteps:\n%s", ran, dumpSteps(qaSteps))
+		if sr.Status != types.StepStatusSkipped {
+			t.Fatalf("--only qa ran the gate step %q; every gate step must be skipped\nsteps:\n%s", sr.StepName, dumpSteps(qaSteps))
+		}
 	}
 	// The selection is a property of the run: it is persisted as the
 	// complementary skip set, which is what a later resume reads back.
@@ -106,6 +104,31 @@ func TestQAStepIsOnDemand(t *testing.T) {
 		if !containsStepName(qaRun.SkipSteps, step) {
 			t.Fatalf("--only qa did not persist %q in the run's skip set: %v", step, qaRun.SkipSteps)
 		}
+	}
+	if got := qaPrompts(h); got != 0 {
+		t.Fatalf("the QA agent ran %d time(s) inside the gate run; the QA pass belongs to the watch run", got)
+	}
+
+	// 3. --with qa keeps the whole pipeline AND selects qa: the gate run is
+	// unchanged, and the selection is what carries QA to the watch run.
+	branch2 := "feature/qa-with"
+	h.CommitChange(branch2, "with.txt", "another change\n", "add another change")
+	out, _ = h.Run("axi", "run", "--with", "qa", "--intent", "ship it and QA the PR")
+
+	withRun := latestRunForBranch(t, h, database, branch2, "")
+	if !containsStepName(withRun.OnlySteps, types.StepQA) {
+		t.Fatalf("--with qa did not record the selection (only_steps = %v)\naxi output:\n%s", withRun.OnlySteps, out)
+	}
+	if containsStepName(withRun.SkipSteps, types.StepQA) {
+		t.Fatalf("--with qa recorded qa as skipped: %v", withRun.SkipSteps)
+	}
+	withSteps, err := database.GetStepsByRun(withRun.ID)
+	if err != nil {
+		t.Fatalf("get --with qa run steps: %v", err)
+	}
+	if len(withSteps) != len(types.GateSteps()) {
+		t.Fatalf("--with qa ran %d steps, want the unchanged %d-step gate sequence\nsteps:\n%s",
+			len(withSteps), len(types.GateSteps()), dumpSteps(withSteps))
 	}
 }
 

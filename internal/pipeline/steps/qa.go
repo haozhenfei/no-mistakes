@@ -3,12 +3,14 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/qadrift"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -17,14 +19,18 @@ import (
 // boots the repository, drives the changed behavior through its real entry
 // points, and reports whether the PR achieves its stated goal.
 //
-// It is an on-demand step (steps.OnDemandSteps): it runs only when a caller
-// names it (`no-mistakes axi run --only qa`), never on an ordinary push.
+// It is the only step of a QA run (types.RunKindQA), which the PR handoff derives
+// alongside the watch run when the caller named qa (`--with qa`, or `--only qa`).
+// It never runs on an ordinary push, and it never delays the CI watcher: the two
+// runs proceed in parallel.
 //
 // Three properties decide where it sits and what it may assume:
 //
-//   - It runs AFTER the pr step, because a PR is its input and its output: it
-//     reads the run's PR URL and reports back to that PR. Before the pr step
-//     there is no PR number to read or write.
+//   - It runs AFTER the PR exists, because a PR is its input and its output: it
+//     reads the run's PR URL and reports back to that PR. Its report names the
+//     commit it exercised, because the PR's head can move afterwards (a CI fix
+//     round) and a verdict about one commit must never be read as a verdict about
+//     another - see internal/qadrift and the watch step.
 //   - It owns no repo knowledge. The four phases below are the whole
 //     methodology, and they contain nothing about any particular repository -
 //     no framework, no dev server, no browser, no upload command. Everything
@@ -145,8 +151,20 @@ func (s *QAStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, fmt.Errorf("parse qa report: %w", err)
 	}
 
+	// Record which verdict this run reached BEFORE publishing anything. The run
+	// row already carries the head SHA, so this is what makes the pair "verdict V
+	// about commit C" durable - and that pair is the whole basis on which a later
+	// watch run can tell the PR that its QA verdict predates the code it is about
+	// to merge. A QA pass whose verdict is not written down is a QA pass that
+	// silently becomes "we verified this" for whatever commit comes later.
+	if sctx.DB != nil {
+		if err := sctx.DB.UpdateRunQAVerdict(sctx.Run.ID, strings.TrimSpace(report.Verdict)); err != nil {
+			return nil, fmt.Errorf("record qa verdict: %w", err)
+		}
+	}
+
 	findings := qaFindings(report)
-	published, publishErr := qaPublish(sctx, host, pr, report)
+	published, publishErr := qaPublish(sctx, host, pr, report, sctx.Run.HeadSHA)
 	if publishErr != nil {
 		// A report that could not reach the PR is still a real result, so the
 		// step does not fail; but it must not look published either. Surface it
@@ -211,6 +229,13 @@ func qaResolvePR(sctx *pipeline.StepContext) (scm.Host, *scm.PR, error) {
 	if pr == nil {
 		return nil, nil, fmt.Errorf("qa needs an existing pull request for %s, and there is none: open one first (a full run does this), then re-run with --only qa", branch)
 	}
+	// Record the PR this QA run is about, so the run row says which PR its verdict
+	// belongs to even when the pr step never ran (`--only qa`).
+	if sctx.DB != nil && strings.TrimSpace(pr.URL) != "" {
+		if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, pr.URL); err != nil {
+			slog.Warn("failed to persist QA run PR URL", "run", sctx.Run.ID, "url", pr.URL, "err", err)
+		}
+	}
 	return host, pr, nil
 }
 
@@ -250,15 +275,19 @@ func qaVerifyWorktreeMatchesPR(sctx *pipeline.StepContext) error {
 // run reads an unresolved thread as "a human is waiting" and parks the PR. So a
 // PASS would park the very PR it just cleared. A non-PASS verdict is exactly the
 // case where parking is the point, so those are posted.
-func qaPublish(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, report qaReport) (bool, error) {
+//
+// The verdict of a PASS is still recorded on the run (runs.qa_verdict) with the
+// commit it is about, so it is not lost: if the PR's head later moves past that
+// commit, the watch run publishes both facts together.
+func qaPublish(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, report qaReport, headSHA string) (bool, error) {
 	if qaVerdictIsClean(report.Verdict) {
-		sctx.Log("QA verdict is PASS: recording the report on the run without commenting on the PR")
+		sctx.Log(fmt.Sprintf("QA verdict is PASS at %s: recording the report on the run without commenting on the PR", shortSHA(headSHA)))
 		return false, nil
 	}
 	if !host.Capabilities().PRComments {
 		return false, fmt.Errorf("%s cannot post PR comments: %w", host.Provider(), scm.ErrUnsupported)
 	}
-	if err := host.PostPRComment(sctx.Ctx, pr, qaCommentBody(report)); err != nil {
+	if err := host.PostPRComment(sctx.Ctx, pr, qaCommentBody(report, headSHA)); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -268,15 +297,37 @@ func qaVerdictIsClean(verdict string) bool {
 	return strings.EqualFold(strings.TrimSpace(verdict), "PASS")
 }
 
+// qaHeadStamp is the one line that makes a QA report attributable: the verdict
+// and the exact commit it was reached against. It leads the comment because it is
+// the fact a reviewer must have before reading anything below it.
+func qaHeadStamp(verdict, headSHA string) string {
+	sha := strings.TrimSpace(headSHA)
+	if sha == "" {
+		// A QA run always knows its head, so this is unreachable in the pipeline.
+		// Saying nothing beats inventing a commit.
+		return ""
+	}
+	return fmt.Sprintf("> **QA verdict %s, verified at commit `%s`.** This report describes that commit and no other.\n\n",
+		qaVerdictLabel(verdict), qadrift.ShortSHA(sha))
+}
+
 // qaCommentBody renders the comment posted to the PR, truncating the tail when
 // the report is too large for the transport. The head of the report carries the
 // verdict, the summary, and the issue list, so a truncated comment still says
 // what was found - only the evidence is cut, and the cut is announced.
-func qaCommentBody(report qaReport) string {
+//
+// It opens with the commit QA actually exercised, because a QA report is a
+// statement about ONE commit and a PR's head moves after it is opened (a fix
+// round for failing CI, a reviewer's suggestion applied in the UI). A report that
+// does not name its commit is silently re-read as a statement about whatever is
+// on the PR when someone happens to read it, which is how a verdict about code
+// that no longer exists ends up vouching for code nobody ran.
+func qaCommentBody(report qaReport, headSHA string) string {
 	body := strings.TrimSpace(report.ReportMarkdown)
 	if body == "" {
 		body = fmt.Sprintf("## QA Report: %s\n\n%s", report.Verdict, report.Summary)
 	}
+	body = qaHeadStamp(report.Verdict, headSHA) + body
 	if len(body) <= maxQACommentBytes {
 		return body
 	}

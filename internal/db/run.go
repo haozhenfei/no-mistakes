@@ -52,7 +52,12 @@ type Run struct {
 	// it was selected and when the row predates the step existing. nil means the
 	// run selected nothing, which is what every ordinary run and every row
 	// written before --only shipped says.
-	OnlySteps       []types.StepName
+	OnlySteps []types.StepName
+	// QAVerdict is the verdict a QA run reached (PASS / PASS_WITH_ISSUES / FAIL /
+	// PARTIAL), and it is nil on every other kind of run. Together with HeadSHA it
+	// is the durable answer to "what did QA conclude, and about which commit" -
+	// the pair a later watch run needs to say a QA verdict has gone stale.
+	QAVerdict       *string
 	Intent          *string
 	IntentSource    *string
 	IntentSessionID *string
@@ -61,7 +66,7 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, COALESCE(kind, 'gate'), parent_run_id, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), skip_steps, only_steps, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, COALESCE(kind, 'gate'), parent_run_id, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), skip_steps, only_steps, qa_verdict, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -70,7 +75,7 @@ func scanRun(row interface {
 	if err := row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
 		&r.Kind, &r.ParentRunID,
-		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS, &skipSteps, &onlySteps,
+		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS, &skipSteps, &onlySteps, &r.QAVerdict,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
@@ -117,15 +122,21 @@ func decodeStepNames(raw *string) ([]types.StepName, error) {
 }
 
 // RunOptions carries the properties fixed at a run's birth: what kind of run it
-// is, which run derived it, and which steps it was told to skip. All three are
-// written with the row rather than by a later UPDATE, so a crash between insert
-// and update can never leave a run whose identity is only in memory.
+// is, which run derived it, which PR it is about, and which steps it was told to
+// skip or selected. All of them are written WITH the row rather than by a later
+// UPDATE, so a crash - or a reader - between insert and update can never see a
+// run whose identity is only half there. A watch run inserted without its PR URL
+// and updated a moment later is a watch run that briefly looks like it is
+// watching nothing.
 type RunOptions struct {
 	Kind        types.RunKind
 	ParentRunID string
-	SkipSteps   []types.StepName
-	// OnlySteps is the run's exclusive selection; see Run.OnlySteps for why it
-	// is stored alongside SkipSteps rather than derived from it.
+	// PRURL is the pull request a derived run is about. Empty for a gate run,
+	// which opens its PR later (the pr step records it).
+	PRURL     string
+	SkipSteps []types.StepName
+	// OnlySteps is the run's selection; see Run.OnlySteps for why it is stored
+	// alongside SkipSteps rather than derived from it.
 	OnlySteps []types.StepName
 }
 
@@ -174,6 +185,10 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 		parent := opts.ParentRunID
 		r.ParentRunID = &parent
 	}
+	if opts.PRURL != "" {
+		prURL := opts.PRURL
+		r.PRURL = &prURL
+	}
 	encodedSkip, err := encodeStepNames(r.SkipSteps)
 	if err != nil {
 		return nil, err
@@ -183,8 +198,8 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 		return nil, err
 	}
 	_, err = d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, kind, parent_run_id, skip_steps, only_steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.Kind, r.ParentRunID, encodedSkip, encodedOnly, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, kind, parent_run_id, pr_url, skip_steps, only_steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.Kind, r.ParentRunID, r.PRURL, encodedSkip, encodedOnly, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
@@ -332,6 +347,45 @@ func (d *DB) UpdateRunPRURL(id, prURL string) error {
 		return fmt.Errorf("update run pr url: %w", err)
 	}
 	return nil
+}
+
+// UpdateRunQAVerdict records the verdict a QA run reached. The run's head SHA
+// is already on the row, so the pair "this verdict is about this commit" becomes
+// durable the moment the QA step finishes - which is what lets a later watch run
+// notice that the PR has moved past the commit QA actually exercised.
+func (d *DB) UpdateRunQAVerdict(id, verdict string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET qa_verdict = ?, updated_at = ? WHERE id = ?`, verdict, now(), id)
+	if err != nil {
+		return fmt.Errorf("update run qa verdict: %w", err)
+	}
+	return nil
+}
+
+// LatestQAVerdict returns the newest run on a branch whose QA node reached a
+// verdict, or nil when QA has never completed for it. The run's head SHA is the
+// commit QA actually exercised.
+//
+// A recorded verdict is the bar, not a completed run: the QA node finishes while
+// the watch run it belongs to is still polling CI, so requiring the RUN to be
+// terminal would hide the verdict for as long as the PR is open - which is
+// exactly when it is needed. Conversely, a run whose QA node never reported has
+// no qa_verdict at all, so a crashed or cancelled QA pass can never be mistaken
+// for one that verified something.
+func (d *DB) LatestQAVerdict(repoID, branch string) (*Run, error) {
+	r := &Run{}
+	err := scanRun(d.sql.QueryRow(
+		`SELECT `+runColumns+` FROM runs
+		 WHERE repo_id = ? AND branch = ? AND qa_verdict IS NOT NULL
+		 ORDER BY created_at DESC, id DESC LIMIT 1`,
+		repoID, branch,
+	), r)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("latest qa verdict: %w", err)
+	}
+	return r, nil
 }
 
 // UpdateRunHeadSHA updates the run head SHA and timestamp.
