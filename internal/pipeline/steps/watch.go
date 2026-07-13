@@ -41,6 +41,13 @@ type WatchStep struct {
 	waitForNextPoll      func(context.Context, time.Duration) error
 	now                  func() time.Time
 	checksGracePeriod    time.Duration
+
+	// notedFreshQA and notedStaleQA hold the QA run whose staleness verdict this
+	// step has already logged, so a poll loop does not repeat the same line every
+	// interval. The PR comment itself is deduplicated durably (db.QANoticePosted),
+	// because a re-armed watch run is a fresh step instance.
+	notedFreshQA string
+	notedStaleQA string
 }
 
 func (s *WatchStep) Name() types.StepName { return types.StepWatch }
@@ -127,6 +134,12 @@ func (s *WatchStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 		if err != nil {
 			return nil, err
 		}
+
+		// Checked on every poll, not once at startup: the QA run this PR's verdict
+		// will come from is very likely still running when the watch run starts
+		// (that is the point of running them in parallel), so the verdict only
+		// becomes readable partway through the watch.
+		s.reportQAStaleness(sctx, host, pr)
 
 		if outcome, done := s.converge(sctx, signals, prURL, elapsed); done {
 			return outcome, nil

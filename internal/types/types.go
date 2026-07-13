@@ -31,6 +31,13 @@ const (
 // local: it is a poller over state the SCM server owns (PR head, check runs,
 // review threads, approval), so it needs no worktree and can be re-armed from
 // scratch after any restart.
+//
+// The watch run is also the "confirm phase": when the caller selected qa, it
+// runs the QA pass and the CI polling as two CONCURRENT nodes and holds a
+// worktree until both converge. QA has to boot the product (worktree, browser,
+// dev server), so the run does own local state in that case - but it still owns
+// no state that anyone else can observe: it moves no ref, pushes nothing, and
+// touches the PR only by commenting. That is what keeps it disposable.
 type RunKind string
 
 const (
@@ -41,8 +48,14 @@ const (
 // Watch reports whether the kind is a post-PR watch run.
 func (k RunKind) Watch() bool { return k == RunKindWatch }
 
+// Gate reports whether the kind is a gate run - the only kind that moves the
+// branch head, the remote, or the PR.
+func (k RunKind) Gate() bool { return k == RunKindGate }
+
 // Valid reports whether the kind is one this build knows how to execute.
-func (k RunKind) Valid() bool { return k == RunKindGate || k == RunKindWatch }
+func (k RunKind) Valid() bool {
+	return k == RunKindGate || k == RunKindWatch
+}
 
 // StepName identifies a pipeline step.
 type StepName string
@@ -59,13 +72,15 @@ const (
 	StepPush     StepName = "push"
 	StepPR       StepName = "pr"
 
-	// StepQA is an on-demand step: it never runs unless the caller names it
-	// (`--only qa`). See OnDemandSteps.
+	// StepQA boots the product and exercises the PR's entry points. It is
+	// on-demand: it runs only when the caller named qa (`--with qa`, or
+	// `--only qa`). It is a step of the post-PR watch run, where it runs
+	// CONCURRENTLY with StepWatch - see WatchStepsFor.
 	StepQA StepName = "qa"
 
-	// StepWatch is the only step of a watch run: it polls the PR the parent
-	// gate run opened and converges on merged/closed, a fix round, or an
-	// escalation to a human.
+	// StepWatch polls the PR the parent gate run opened and converges on
+	// merged/closed, a fix round, or an escalation to a human. It is one of the
+	// two concurrent nodes of the watch run; qa is the other.
 	StepWatch StepName = "watch"
 
 	// StepCI is the pre-split blocking CI monitor. It no longer runs: watch
@@ -135,10 +150,13 @@ func (s StepName) Order() int {
 		return 9
 	case StepPR:
 		return 10
+	// qa and watch are the watch run's two CONCURRENT nodes. The order between
+	// them is not an execution order - it is the order a resume walks, and qa
+	// comes first so a completed QA pass is reused instead of paid for twice.
 	case StepQA:
-		return 12 // on-demand; runs after the PR exists
+		return 12
 	case StepWatch:
-		return 1
+		return 13
 	case StepCI:
 		return 11 // legacy; never executed
 	default:
@@ -157,16 +175,28 @@ func WatchSteps() []StepName {
 	return []StepName{StepWatch}
 }
 
-// OnDemandSteps returns the gate steps that are OFF by default and run only
-// when a caller names them (`--only qa`). They are deliberately not part of
-// GateSteps: a push, a rerun, or a watch-derived fix round must never pay for
-// them. The run's skip set carries the decision (see SelectableSteps), so it
-// survives a resume like every other skip.
+// WatchStepsFor returns the watch run's steps for a run with this selection.
+// The two are CONCURRENT nodes, not a sequence: qa is listed first only so that
+// a resume reuses a completed QA pass (the expensive one) and re-executes the
+// poll (the cheap one) - see pipeline.Executor's parallel phase.
+func WatchStepsFor(selection []StepName) []StepName {
+	if SelectsQA(selection) {
+		return []StepName{StepQA, StepWatch}
+	}
+	return WatchSteps()
+}
+
+// OnDemandSteps returns the steps that are OFF by default and run only when a
+// caller names them (`--with qa`, or `--only qa`). They are deliberately not
+// part of GateSteps: a push, a rerun, or a watch-derived fix round must never
+// pay for them.
 //
-// Today the only member is qa, which drives a full product-level QA pass
-// against the MR the gate run just opened. It costs an agent session, an
-// environment bootstrap, and a real browser; measured on one CSS-only MR that
-// was +24min and +400k tokens for one finding, so it is on-demand by design.
+// Today the only member is qa. It is not a gate step: naming it adds a QA node
+// to the post-PR watch run, where it runs concurrently with the CI poll, so the
+// PR is watched from the moment it opens instead of ~25 minutes later. QA costs
+// an agent session, an environment bootstrap, and a real browser; measured on one
+// CSS-only MR that was +24min and +400k tokens for one finding, so it is
+// on-demand by design.
 func OnDemandSteps() []StepName {
 	return []StepName{StepQA}
 }
@@ -176,6 +206,19 @@ func OnDemandSteps() []StepName {
 // derived by the daemon, never requested step-by-step.
 func SelectableSteps() []StepName {
 	return append(GateSteps(), OnDemandSteps()...)
+}
+
+// SelectsQA reports whether a run's persisted selection (runs.only_steps) names
+// the qa step, which is what puts a QA node in the watch run it hands off to. A
+// nil or empty selection - every ordinary run, and every row written before qa
+// existed - selects nothing.
+func SelectsQA(selection []StepName) bool {
+	for _, step := range selection {
+		if step == StepQA {
+			return true
+		}
+	}
+	return false
 }
 
 // IsOnDemandStep reports whether a step only runs when explicitly selected.
@@ -198,7 +241,7 @@ func StepsForKind(kind RunKind) []StepName {
 
 // KnownSteps returns every step name this build recognizes, across both run
 // kinds. Use it to validate user-supplied step names and to enumerate steps for
-// reporting; use GateSteps/WatchSteps when you mean one run's sequence.
+// reporting; use GateSteps/WatchStepsFor when you mean one run's sequence.
 func KnownSteps() []StepName {
 	return append(SelectableSteps(), WatchSteps()...)
 }

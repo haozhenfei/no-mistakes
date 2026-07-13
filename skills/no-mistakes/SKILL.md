@@ -18,14 +18,21 @@ flags yourself - for example, "skip the lint step" becomes `--skip=lint`, and
 `no-mistakes axi run --help` to see the available flags.
 
 `--only=<steps>` runs exactly the steps you name and skips every other one
-(it cannot be combined with `--skip`). Two uses matter:
+(it cannot be combined with `--skip`). `--only=review` (or any other single
+step) re-runs that step alone.
 
-- `--only=qa` runs the QA step alone: an agent boots the product, drives the
-  changed behavior through its real entry points, and reports to the pull
-  request. QA is off in every ordinary run - it is expensive, and it needs a PR
-  to already exist - so `--only=qa` is the way to ask for it. Run it after a
-  normal run has opened the PR. Only do this when the user asks for QA.
-- `--only=review` (or any other single step) re-runs that step alone.
+`--with=qa` adds the QA pass to an otherwise normal run: an agent boots the
+product, drives the changed behavior through its real entry points, and reports
+to the pull request. It starts once the PR exists and runs alongside the CI
+monitoring, so it delays nothing. QA is off in every ordinary run - it is
+expensive - so naming it is the only way it runs. Only do this when the user asks
+for QA. `--only=qa` QAs the branch's existing pull request without running the
+rest of the pipeline.
+
+A QA verdict is about the exact commit it exercised, and the report says which.
+If a later fix round changes product source, the pull request gets a comment
+saying the verdict is older than the code; QA is not re-run automatically, since
+that is a call for the user to make.
 
 ## Two ways to invoke
 

@@ -48,10 +48,27 @@ type Executor struct {
 	sessions *RunSessions
 	shared   *RunShared
 
+	// parallel names the steps that form ONE concurrent phase. Steps outside it
+	// run sequentially, exactly as they always have. Today only the watch run
+	// uses it, for its two nodes (qa + watch): the PR must be polled from the
+	// moment it opens, not after a ~25-minute QA pass, and the run must hold its
+	// worktree until both have converged.
+	parallel map[types.StepName]bool
+
 	mu          sync.Mutex
 	approvalCh  chan approvalResponse // buffered channel for approval responses
 	waiting     bool                  // true when blocked on approval
 	waitingStep types.StepName        // which step is currently awaiting approval
+
+	// gateSem serializes the approval gate across concurrently-running steps. The
+	// gate is single-occupancy by design - one waitingStep, one approvalCh, one
+	// runs.awaiting_agent_since - and that invariant is what the driving agent,
+	// `axi status`, and crash recovery all read. A step in a parallel phase that
+	// needs approval therefore takes this semaphore first and holds it until its
+	// whole gate (including any fix rounds) is resolved; a concurrent sibling that
+	// also wants to park waits its turn instead of overwriting the gate. The other
+	// node keeps running while it waits - only the PARKING is serialized.
+	gateSem chan struct{}
 }
 
 // SetSkippedSteps configures steps that should be marked skipped without
@@ -75,6 +92,39 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		steps:      steps,
 		onEvent:    onEvent,
 		approvalCh: make(chan approvalResponse, 1),
+		gateSem:    make(chan struct{}, 1),
+	}
+}
+
+// SetParallelPhase marks the steps that run as one concurrent phase. Every other
+// step still runs sequentially. The phase's steps must be contiguous in the
+// executor's step list.
+func (e *Executor) SetParallelPhase(steps []types.StepName) {
+	if len(steps) == 0 {
+		e.parallel = nil
+		return
+	}
+	e.parallel = make(map[types.StepName]bool, len(steps))
+	for _, step := range steps {
+		e.parallel[step] = true
+	}
+}
+
+// acquireGate takes the single approval gate, or gives up when the run is
+// cancelled. A step that never parks never calls this.
+func (e *Executor) acquireGate(ctx context.Context) error {
+	select {
+	case e.gateSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+func (e *Executor) releaseGate() {
+	select {
+	case <-e.gateSem:
+	default:
 	}
 }
 
@@ -140,35 +190,12 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		stepRecords[step.Name()] = sr
 	}
 
-	// Execute steps sequentially
-	for i, step := range e.steps {
-		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx))
-		}
-
-		sr := stepRecords[step.Name()]
-		if e.skips[step.Name()] {
-			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
-				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
-			}
-			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusSkipped), "", "", "", nil)
-			continue
-		}
-		skipRemaining, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, stepExecutionState{})
-		if err != nil {
-			return e.failRun(run, repo, err, ctx)
-		}
-		if skipRemaining {
-			// Mark all subsequent steps as skipped
-			for _, remaining := range e.steps[i+1:] {
-				rsr := stepRecords[remaining.Name()]
-				if dbErr := e.db.CompleteStepWithStatus(rsr.ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
-					slog.Warn("failed to finalize skipped step", "step", remaining.Name(), "error", dbErr)
-				}
-				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, remaining.Name(), string(types.StepStatusSkipped), "", "", "", nil)
-			}
-			break
-		}
+	records := make([]*db.StepResult, 0, len(e.steps))
+	for _, step := range e.steps {
+		records = append(records, stepRecords[step.Name()])
+	}
+	if err := e.runSteps(ctx, run, repo, workDir, logDir, records, 0); err != nil {
+		return e.failRun(run, repo, err, ctx)
 	}
 
 	// Mark run as completed
@@ -254,31 +281,8 @@ func (e *Executor) ResumeFrom(ctx context.Context, run *db.Run, repo *db.Repo, w
 		results[i].Status = types.StepStatusPending
 	}
 
-	for index := start; index < len(e.steps); index++ {
-		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx), ctx)
-		}
-		stepName := e.steps[index].Name()
-		if e.skips[stepName] {
-			if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
-				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", stepName, err), ctx)
-			}
-			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusSkipped), "", "", "", nil)
-			continue
-		}
-		skipRemaining, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, stepExecutionState{})
-		if err != nil {
-			return e.failRun(run, repo, err, ctx)
-		}
-		if skipRemaining {
-			for _, remaining := range results[index+1:] {
-				if dbErr := e.db.CompleteStepWithStatus(remaining.ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
-					slog.Warn("failed to finalize skipped step", "step", remaining.StepName, "error", dbErr)
-				}
-				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, remaining.StepName, string(types.StepStatusSkipped), "", "", "", nil)
-			}
-			break
-		}
+	if err := e.runSteps(ctx, run, repo, workDir, logDir, results, start); err != nil {
+		return e.failRun(run, repo, err, ctx)
 	}
 
 	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
@@ -287,6 +291,139 @@ func (e *Executor) ResumeFrom(ctx context.Context, run *db.Run, repo *db.Repo, w
 	run.Status = types.RunCompleted
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return nil
+}
+
+// runSteps executes e.steps[start:] against their step_results rows. It is the
+// one loop both Execute and ResumeFrom go through, so a fresh run and a resumed
+// run cannot drift apart in how they skip, park, or parallelize.
+//
+// Steps run sequentially, except for the steps of the parallel phase
+// (SetParallelPhase), which run concurrently with each other and are joined
+// before the loop moves on. A resume that starts inside the phase runs whatever
+// is left of it - which is the point of the phase's ordering: a completed QA node
+// is reused and only the poll re-runs.
+func (e *Executor) runSteps(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, records []*db.StepResult, start int) error {
+	for index := start; index < len(e.steps); index++ {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		if end := e.parallelPhaseEnd(index); end > index+1 {
+			skipRemaining, err := e.runParallelPhase(ctx, run, repo, workDir, logDir, records, index, end)
+			if err != nil {
+				return err
+			}
+			if skipRemaining {
+				e.skipRemainingSteps(run, repo, records, end)
+				return nil
+			}
+			index = end - 1
+			continue
+		}
+
+		step := e.steps[index]
+		if e.skips[step.Name()] {
+			if err := e.skipStep(run, repo, records[index], step.Name()); err != nil {
+				return err
+			}
+			continue
+		}
+		skipRemaining, err := e.executeStep(ctx, step, records[index], run, repo, workDir, logDir, stepExecutionState{})
+		if err != nil {
+			return err
+		}
+		if skipRemaining {
+			e.skipRemainingSteps(run, repo, records, index+1)
+			return nil
+		}
+	}
+	return nil
+}
+
+// parallelPhaseEnd returns the exclusive end index of the concurrent phase that
+// starts at index, or index itself when the step there is not part of one.
+func (e *Executor) parallelPhaseEnd(index int) int {
+	if len(e.parallel) == 0 || !e.parallel[e.steps[index].Name()] {
+		return index
+	}
+	end := index
+	for end < len(e.steps) && e.parallel[e.steps[end].Name()] {
+		end++
+	}
+	return end
+}
+
+// runParallelPhase runs a contiguous group of steps at the same time and returns
+// once every one of them has converged.
+//
+// Each node goes through the ordinary executeStep machinery - its own step row,
+// its own log, its own findings, its own gate - so nothing about a step changes
+// because it happens to run next to another one. Only two things are special:
+// the gate is single-occupancy (acquireGate), and the phase joins before the run
+// moves on, which is what "the run holds its worktree until both nodes converge"
+// means in code.
+//
+// A node that fails does not cancel its sibling: the sibling is doing unrelated
+// work (a QA pass has nothing to do with a CI poll), and killing a ~25-minute QA
+// pass because a poll errored would throw away the more expensive of the two. The
+// first error is returned once both have stopped.
+func (e *Executor) runParallelPhase(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, records []*db.StepResult, start, end int) (bool, error) {
+	type nodeResult struct {
+		skipRemaining bool
+		err           error
+	}
+	results := make([]nodeResult, end-start)
+
+	var wg sync.WaitGroup
+	for i := start; i < end; i++ {
+		step := e.steps[i]
+		if e.skips[step.Name()] {
+			if err := e.skipStep(run, repo, records[i], step.Name()); err != nil {
+				return false, err
+			}
+			continue
+		}
+		wg.Add(1)
+		go func(slot int, step Step, sr *db.StepResult) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					results[slot] = nodeResult{err: fmt.Errorf("step %s: internal panic: %v", step.Name(), r)}
+				}
+			}()
+			skipRemaining, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, stepExecutionState{})
+			results[slot] = nodeResult{skipRemaining: skipRemaining, err: err}
+		}(i-start, step, records[i])
+	}
+	wg.Wait()
+
+	skipRemaining := false
+	var firstErr error
+	for _, result := range results {
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+		}
+		if result.skipRemaining {
+			skipRemaining = true
+		}
+	}
+	return skipRemaining, firstErr
+}
+
+func (e *Executor) skipStep(run *db.Run, repo *db.Repo, sr *db.StepResult, stepName types.StepName) error {
+	if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
+		return fmt.Errorf("skip step %s: %w", stepName, err)
+	}
+	e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusSkipped), "", "", "", nil)
+	return nil
+}
+
+func (e *Executor) skipRemainingSteps(run *db.Run, repo *db.Repo, records []*db.StepResult, from int) {
+	for i := from; i < len(records); i++ {
+		if dbErr := e.db.CompleteStepWithStatus(records[i].ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
+			slog.Warn("failed to finalize skipped step", "step", records[i].StepName, "error", dbErr)
+		}
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, records[i].StepName, string(types.StepStatusSkipped), "", "", "", nil)
+	}
 }
 
 func (e *Executor) resetRunScopedStateForResume(runID string, firstRerunStep types.StepName) error {
@@ -621,6 +758,17 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		autoFixLimit = e.config.AutoFixLimit(stepName)
 	}
 
+	// heldGate is true once this step has taken the run's single approval gate.
+	// It is held across the step's whole gate - including every fix round - and
+	// released when the step is done, so a concurrent sibling cannot park on top
+	// of it. Released on every exit path.
+	heldGate := false
+	defer func() {
+		if heldGate {
+			e.releaseGate()
+		}
+	}()
+
 	// Mark step as running
 	if err := e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit); err != nil {
 		return false, fmt.Errorf("start step %s: %w", stepName, err)
@@ -850,6 +998,22 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 		// Freeze execution timer before entering approval wait.
 		executionMS += elapsedMillis(phaseStart)
+
+		// Take the run's single approval gate before publishing this one. In a
+		// sequential run it is always free. In a parallel phase a sibling node may
+		// hold it, and waiting here is what keeps the gate single-occupancy: one
+		// waitingStep, one awaiting_agent_since, one thing for the driving agent to
+		// answer. The sibling keeps running while this step waits.
+		if !heldGate {
+			if gateErr := e.acquireGate(ctx); gateErr != nil {
+				if dbErr := e.db.FailStep(sr.ID, gateErr.Error(), executionMS); dbErr != nil {
+					slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", gateErr.Error(), &executionMS)
+				return false, fmt.Errorf("step %s: waiting for the approval gate: %w", stepName, gateErr)
+			}
+			heldGate = true
+		}
 
 		// Determine approval status: fix_review after a fix cycle, awaiting_approval otherwise
 		approvalStatus := types.StepStatusAwaitingApproval

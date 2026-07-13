@@ -223,13 +223,14 @@ Stores the PR URL in the database and streams it to the TUI.
 
 Exercises the product the way a human QA engineer would: boots the repository, drives the changed behavior through its real entry points (pages, endpoints, commands), and reports whether the pull request achieves its stated goal.
 
-**On demand only.** QA is not part of an ordinary run. It runs when a caller names it:
+**On demand only.** QA is not part of an ordinary run, and it is not a gate step. It runs when a caller names it:
 
 ```sh
-no-mistakes axi run --only qa
+no-mistakes axi run --with qa   # the full pipeline, then QA the PR it opened
+no-mistakes axi run --only qa   # QA the branch's existing PR, nothing else
 ```
 
-It runs after the PR step because the pull request is both its input and its output: it reads the PR and comments on it. Run it once a normal run has opened one. See [`--only`](/no-mistakes/reference/cli/#no-mistakes-axi-run).
+Naming it puts a QA node in the [watch run](/no-mistakes/concepts/pipeline/#watch-runs), where it runs **concurrently** with the CI poll: the pull request is both its input and its output (it reads the PR and comments on it), and the PR must not go unwatched for the ~25 minutes a QA pass takes. The watch run holds a worktree until both nodes converge. See [`--with`](/no-mistakes/reference/cli/#no-mistakes-axi-run).
 
 **Fails when:**
 - The branch has no pull request (nothing to QA, and nothing to report to)
@@ -247,13 +248,14 @@ It fails rather than skips, because a skipped QA step would report success for a
 - **Anything but a clean `PASS` parks the run** for a decision. The verdict gates on its own, not only the issue list, so a `FAIL` written in prose cannot finish green
 - Every entry point the agent could not exercise is reported as a finding, so an unverified pass never looks like a verified one
 - Publishes the report as a comment on the pull request for every verdict except a clean `PASS`. A clean `PASS` is recorded on the run only: on hosts that model comment threads, an unresolved thread makes a watch run park the PR, so a PASS comment would park the very PR it just cleared
-- Findings never auto-fix. QA reports what the product did; deciding what to change in response is a product decision, so findings park for a human — the same stance as `auto_fix.review: 0`
+- Findings never auto-fix. QA reports what the product did; deciding what to change in response is a product decision, so findings park for a human — the same stance as `auto_fix.review: 0`. Answering the parked node with `fix` derives a gate run, so the change re-crosses review, test, and lint before the PR sees it
+- **The report names the commit it verified**, and the verdict is recorded on the run. A pull request's head moves after it opens; a verdict that does not say which commit it covers is silently re-read as a verdict about whatever is on the PR later. When a fix round changes product source after QA ran, the pull request gets a comment saying so (see [the QA node](/no-mistakes/concepts/pipeline/#the-qa-node))
 
 **Configure it with** [`qa.instructions`](/no-mistakes/reference/repo-config/#qainstructions): the methodology above ships with no-mistakes and knows nothing about your repository, so that field is where you point the agent at how to boot your app, which surfaces run locally, and how to capture evidence.
 
 ## Watch
 
-Monitors the PR after the gate run has ended. It is the only step of a watch run, holds no worktree, and invokes no agent.
+Monitors the PR after the gate run has ended. It holds no worktree and invokes no agent. It is the watch run's only step unless the run was started with `--with qa`, in which case the [QA step](#qa) runs alongside it.
 
 **Active for GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), Azure DevOps (`dev.azure.com` / `*.visualstudio.com`), and ByteDance Codebase**.
 
@@ -275,6 +277,7 @@ Review threads and approval state are read on GitHub and Codebase; the other pro
 - **Unresolved comment threads:** pauses for approval with one finding per thread, carrying the author, location, and comment body. Never auto-fixed, whoever opened them
 - **Green but blocked on approval:** pauses for approval with a finding naming the PR and its review state
 - When the driving agent answers a paused watch run with `fix`, the selected findings seed a derived gate run rather than a change made inside the watch run
+- **A QA verdict that predates the PR's head:** when the run's QA node verified an earlier commit and product source has changed since, the poll comments on the pull request with both commits and the changed product files. Only lockfiles, CI config, linter config, docs, or a pure reformat leave the verdict standing. QA is never re-run automatically
 
 **Default fix-round limit:** `auto_fix.ci` (`3`), counted over the PR's chain of watch and gate runs.
 

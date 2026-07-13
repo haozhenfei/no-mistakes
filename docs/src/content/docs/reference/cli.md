@@ -83,6 +83,7 @@ An active run on another branch does not block starting validation for the curre
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --yes
+no-mistakes axi run --intent "the user's goal" --with qa
 no-mistakes axi run --only qa
 ```
 
@@ -92,9 +93,12 @@ no-mistakes axi run --only qa
 | `-y`, `--yes` | `bool`   | `false` | Auto-resolve every gate until a decision point or outcome        |
 | `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
 | `--only`      | `string` | (none)  | Comma-separated pipeline steps to run exclusively; skips every other step |
+| `--with`      | `string` | (none)  | Comma-separated on-demand steps to add to a normal run (`qa`)    |
 
 `--only` is the complement of `--skip`, and the two cannot be combined.
-`--only review` re-runs the review step alone; `--only qa` runs the [QA step](/no-mistakes/reference/pipeline-steps/#qa) alone against the branch's existing pull request.
+`--only review` re-runs the review step alone; `--only qa` runs the [QA step](/no-mistakes/reference/pipeline-steps/#qa) against the branch's existing pull request without running the rest of the pipeline.
+
+`--with` is additive and composes with either: `--with qa` runs the whole pipeline and then, once the pull request exists, starts the QA pass alongside the CI monitoring instead of delaying it. QA never runs unless it is named.
 A run that names neither `push` nor `pr` cannot change the pull request, so it leaves any watch run on that branch monitoring it undisturbed.
 The step set belongs to the run, so `no-mistakes axi resume` continues with the same steps and takes no step flags of its own.
 

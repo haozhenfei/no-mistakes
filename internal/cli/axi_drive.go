@@ -61,6 +61,7 @@ func newAxiRunCmd() *cobra.Command {
 	var autoYes bool
 	var skipValue string
 	var onlyValue string
+	var withValue string
 	var intent string
 
 	cmd := &cobra.Command{
@@ -77,6 +78,10 @@ func newAxiRunCmd() *cobra.Command {
 			"--only runs exactly the named steps and skips the rest (`--only qa` runs the\n" +
 			"QA pass alone against the branch's existing PR; `--only review` reviews without\n" +
 			"testing or pushing). It cannot be combined with --skip.\n\n" +
+			"--with adds an on-demand step to an otherwise normal run: `--with qa` runs the\n" +
+			"full pipeline and then, once the PR exists, starts a product-level QA pass that\n" +
+			"runs alongside the CI watcher instead of delaying it. QA is never run unless\n" +
+			"named.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary or a configured\n" +
 			"ACP target through acpx, and fails before the first step when none can run.\n\n" +
@@ -90,8 +95,9 @@ func newAxiRunCmd() *cobra.Command {
 				"has_intent": strings.TrimSpace(intent) != "",
 				"has_skip":   strings.TrimSpace(skipValue) != "",
 				"has_only":   strings.TrimSpace(onlyValue) != "",
+				"has_with":   strings.TrimSpace(withValue) != "",
 			}, func() error {
-				selection, err := parseStepSelection(skipValue, onlyValue)
+				selection, err := parseStepSelectionWith(skipValue, onlyValue, withValue)
 				if err != nil {
 					return emitError(cmd, 2, err.Error(), stepSelectionHelp())
 				}
@@ -102,6 +108,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&onlyValue, "only", "", "comma-separated pipeline steps to run exclusively (skips every other step; not combinable with --skip)")
+	cmd.Flags().StringVar(&withValue, "with", "", "comma-separated on-demand steps to add to a normal run (qa); QA runs after the PR exists, in parallel with the CI watcher")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	return cmd
 }
@@ -417,6 +424,7 @@ func rerunParams(repoID, branch string, selection stepSelection, intent string) 
 		Branch:    branch,
 		SkipSteps: selection.skip,
 		OnlySteps: selection.only,
+		WithSteps: selection.with,
 		Intent:    intent,
 	}
 }

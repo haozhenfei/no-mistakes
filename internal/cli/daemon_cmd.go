@@ -66,6 +66,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if len(skipSteps) > 0 && len(onlySteps) > 0 {
 				return fmt.Errorf("push options no-mistakes.skip and no-mistakes.only cannot be combined: only already skips every step it does not name")
 			}
+			withSteps, err := parseWithPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			intent, err := parseIntentPushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -94,6 +98,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				New:       newSHA,
 				SkipSteps: skipSteps,
 				OnlySteps: onlySteps,
+				WithSteps: withSteps,
 				Intent:    intent,
 			}, &result)
 		},
@@ -194,6 +199,10 @@ func formatOnlyPushOptions(steps []types.StepName) []string {
 	return formatStepPushOptions(onlyPushOptionPrefix, steps)
 }
 
+func formatWithPushOptions(steps []types.StepName) []string {
+	return formatStepPushOptions(withPushOptionPrefix, steps)
+}
+
 func formatStepPushOptions(prefix string, steps []types.StepName) []string {
 	if len(steps) == 0 {
 		return nil
@@ -244,6 +253,66 @@ func parseOnlySteps(value string) ([]types.StepName, error) {
 	return dedupeSteps(steps), nil
 }
 
+// withPushOptionPrefix carries an additive on-demand selection through the git
+// push that starts a run.
+const withPushOptionPrefix = "no-mistakes.with="
+
+func parseWithPushOptions(options []string) ([]types.StepName, error) {
+	var steps []types.StepName
+	for _, option := range options {
+		value, ok := strings.CutPrefix(option, withPushOptionPrefix)
+		if !ok {
+			continue
+		}
+		parsed, err := parseWithSteps(value)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, parsed...)
+	}
+	return dedupeSteps(steps), nil
+}
+
+// parseWithSteps validates a --with selection: the on-demand steps to add to an
+// otherwise normal run. It accepts ONLY on-demand steps, because that is the only
+// thing --with can mean - every other step is already in the pipeline, so naming
+// one here would silently do nothing.
+//
+// It exists because --only cannot express "the usual pipeline, plus QA": --only
+// is exclusive, so `--only qa` runs QA alone. Naming the other ten steps to get
+// the eleventh is not a usable interface, and "the full gate, then QA next to the
+// CI watcher" is the case this whole run-kind split was built for.
+func parseWithSteps(value string) ([]types.StepName, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	var steps []types.StepName
+	for _, part := range strings.Split(value, ",") {
+		step := types.StepName(strings.TrimSpace(part))
+		if !types.IsOnDemandStep(step) {
+			return nil, fmt.Errorf("--with accepts only on-demand steps (%s); %q is %s",
+				onDemandStepList(), step, withStepRejection(step))
+		}
+		steps = append(steps, step)
+	}
+	return dedupeSteps(steps), nil
+}
+
+func withStepRejection(step types.StepName) string {
+	if selectableStep(step) || validStep(step) {
+		return "already part of the pipeline - use --skip or --only to change which steps run"
+	}
+	return "not a known step"
+}
+
+func onDemandStepList() string {
+	names := make([]string, 0, len(types.OnDemandSteps()))
+	for _, step := range types.OnDemandSteps() {
+		names = append(names, string(step))
+	}
+	return strings.Join(names, ", ")
+}
+
 func validStep(step types.StepName) bool {
 	return containsStepName(types.KnownSteps(), step)
 }
@@ -271,17 +340,24 @@ func stepSelectionFlagsError(skipValue, onlyValue string) error {
 	return nil
 }
 
-// stepSelection is what a caller asked a new run to execute: either a set of
-// steps to skip (--skip) or an exclusive set to run (--only). The daemon
-// resolves it into the run's persisted skip set, so only one of the two is ever
-// populated.
+// stepSelection is what a caller asked a new run to execute: a set of steps to
+// skip (--skip) or an exclusive set to run (--only), plus any on-demand steps to
+// add (--with). --skip and --only are mutually exclusive; --with composes with
+// either, because it answers a different question ("also do this") from both of
+// them ("do not do this" / "do nothing else").
 type stepSelection struct {
 	skip []types.StepName
 	only []types.StepName
+	with []types.StepName
 }
 
 // parseStepSelection validates --skip/--only and rejects them together.
 func parseStepSelection(skipValue, onlyValue string) (stepSelection, error) {
+	return parseStepSelectionWith(skipValue, onlyValue, "")
+}
+
+// parseStepSelectionWith validates the full --skip/--only/--with triple.
+func parseStepSelectionWith(skipValue, onlyValue, withValue string) (stepSelection, error) {
 	if err := stepSelectionFlagsError(skipValue, onlyValue); err != nil {
 		return stepSelection{}, err
 	}
@@ -293,17 +369,22 @@ func parseStepSelection(skipValue, onlyValue string) (stepSelection, error) {
 	if err != nil {
 		return stepSelection{}, err
 	}
-	return stepSelection{skip: skip, only: only}, nil
+	with, err := parseWithSteps(withValue)
+	if err != nil {
+		return stepSelection{}, err
+	}
+	return stepSelection{skip: skip, only: only, with: with}, nil
 }
 
 // pushOptions renders the selection for the git push that starts a run.
 func (s stepSelection) pushOptions() []string {
-	return append(formatSkipPushOptions(s.skip), formatOnlyPushOptions(s.only)...)
+	options := append(formatSkipPushOptions(s.skip), formatOnlyPushOptions(s.only)...)
+	return append(options, formatWithPushOptions(s.with)...)
 }
 
 // empty reports whether the caller asked for the default pipeline.
 func (s stepSelection) empty() bool {
-	return len(s.skip) == 0 && len(s.only) == 0
+	return len(s.skip) == 0 && len(s.only) == 0 && len(s.with) == 0
 }
 
 // stepSelectionHelp lists the step names --skip and --only accept.

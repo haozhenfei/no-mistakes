@@ -53,12 +53,15 @@ func TestStepNameOrder(t *testing.T) {
 		{StepLint, 8},
 		{StepPush, 9},
 		{StepPR, 10},
-		{StepWatch, 1},
-		// qa runs after the PR exists, so it sorts after every gate step. The
-		// name was used once before, by a pre-split step that was folded into
-		// test; a historical step_results row named "qa" now sorts here, which
-		// only affects how that stale row renders.
+		// qa and watch are the watch run's two CONCURRENT nodes, so the order
+		// between them is not an execution order: it is the order a resume walks,
+		// and qa comes first so a completed (expensive) QA pass is reused while the
+		// (cheap) poll runs again. Both sort after every gate step, since neither
+		// runs before the PR exists. The qa name was used once before, by a
+		// pre-split step folded into test; a historical row named "qa" now sorts
+		// here, which only affects how that stale row renders.
 		{StepQA, 12},
+		{StepWatch, 13},
 		{StepName("unknown"), 0},
 	}
 
