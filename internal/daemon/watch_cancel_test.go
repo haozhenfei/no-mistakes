@@ -259,3 +259,62 @@ func TestRearmSkipsWatchRunWithoutPR(t *testing.T) {
 		t.Fatalf("status = %s, want interrupted", run.Status)
 	}
 }
+
+// A QA-only gate run must NOT cancel the branch's watcher. It skips push and pr,
+// so it cannot move origin or touch the PR the watcher is polling - and it will
+// not derive a replacement watcher either, because deriving one needs a PR its
+// own pr step opened. Cancelling would leave the PR permanently unwatched:
+// failing CI would derive no fix round and nothing would escalate.
+func TestQAOnlyGateRunDoesNotCancelActiveWatchRun(t *testing.T) {
+	mgr, p, d := newTestManager(t)
+	repo, headSHA := setupTestGitRepo(t, p, d, "repo-qa-keeps-watch")
+
+	watchStarted := make(chan struct{})
+	mgr.SetWatchStepFactory(func() []pipeline.Step {
+		return []pipeline.Step{&mockSlowStep{name: types.StepWatch, started: watchStarted}}
+	})
+	// The gate factory stands in for the pipeline; the qa step the run selects is
+	// appended to it by execStepsFor.
+	mgr.steps = func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepPush}}
+	}
+
+	parent, err := d.InsertRun(repo.ID, "main", headSHA, headSHA)
+	if err != nil {
+		t.Fatalf("insert parent gate run: %v", err)
+	}
+	if err := d.UpdateRunPRURL(parent.ID, testPRURL); err != nil {
+		t.Fatalf("set pr url: %v", err)
+	}
+	parent, _ = d.GetRun(parent.ID)
+
+	watchID, err := mgr.startWatchRun(context.Background(), repo, parent)
+	if err != nil {
+		t.Fatalf("start watch run: %v", err)
+	}
+	select {
+	case <-watchStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("watch run never started")
+	}
+
+	// `axi run --only qa`.
+	gateID, err := mgr.startRun(context.Background(), repo, runSpec{
+		branch: "main", headSHA: headSHA, baseSHA: headSHA, trigger: "rerun",
+		onlySteps: []types.StepName{types.StepQA},
+	})
+	if err != nil {
+		t.Fatalf("start qa-only gate run: %v", err)
+	}
+	// The qa step itself fails here (this fixture has no PR host); what matters
+	// is what the run did to the watcher on its way in.
+	waitForRunTerminalState(t, d, gateID)
+
+	watch, err := d.GetRun(watchID)
+	if err != nil {
+		t.Fatalf("get watch run: %v", err)
+	}
+	if watch.Status == types.RunCancelled {
+		t.Fatalf("a --only qa run cancelled the branch's watch run (error=%v); the PR is now unwatched and no replacement watcher is derived", watch.Error)
+	}
+}

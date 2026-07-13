@@ -201,6 +201,11 @@ type Capabilities struct {
 	FailedCheckLogs bool
 	ReviewThreads   bool
 	ReviewState     bool
+	// PRComments reports whether the host can post a top-level comment on a PR.
+	// The qa step needs it to publish its report where reviewers already look;
+	// without it QA still records its report on the run, and says so rather than
+	// pretending it published.
+	PRComments bool
 }
 
 // ErrUnsupported is returned by optional Host methods that the provider
@@ -241,4 +246,14 @@ type Host interface {
 	// GetReviewState is optional; implementations without
 	// Capabilities().ReviewState must return ErrUnsupported.
 	GetReviewState(ctx context.Context, pr *PR) (ReviewState, error)
+
+	// PostPRComment posts a top-level comment on the PR. It is optional;
+	// implementations without Capabilities().PRComments must return
+	// ErrUnsupported.
+	//
+	// A posted comment is an unresolved review thread on the hosts that model
+	// threads (see ListReviewThreads), which a watch run reads as "someone is
+	// waiting on a human". That is deliberate for a QA report that found
+	// something, and the reason the qa step does not post a clean PASS.
+	PostPRComment(ctx context.Context, pr *PR, body string) error
 }

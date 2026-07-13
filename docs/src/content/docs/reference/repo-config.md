@@ -6,9 +6,9 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `test.evidence.upload_cmd` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, and `test.evidence.upload_cmd` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, those fields are forced empty - the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands`, `agent`, and [`test.evidence.upload_cmd`](#the-upload-hook-upload_cmd) you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, and the rest of `test` - including `evidence.store_in_repo` and `evidence.dir`) are still read from the pushed branch. The two gate-prompt policy fields join the executing ones: `document.instructions` and `review.instructions` are also read only from the trusted default branch, because a pushed branch must not be able to rewrite the rules that gate it.
+`commands.*` and `test.evidence.upload_cmd` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, and `test.evidence.upload_cmd` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, those fields are forced empty - the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands`, `agent`, and [`test.evidence.upload_cmd`](#the-upload-hook-upload_cmd) you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, and the rest of `test` - including `evidence.store_in_repo` and `evidence.dir`) are still read from the pushed branch. The gate-prompt policy fields join the executing ones: `document.instructions`, `review.instructions`, and `qa.instructions` are also read only from the trusted default branch, because a pushed branch must not be able to rewrite the rules that gate it.
 
-If you genuinely want the whole repo config read from the branch being gated (for example, a single-developer repo where you trust your own feature branches, or a repo whose `.no-mistakes.yaml` can only live on feature branches because the default branch is frozen), opt in with [`allow_repo_commands: true`](#allow_repo_commands) - in this same file on your default branch, or in [`repos.<path>`](/no-mistakes/reference/global-config/#repos) in your global config. With the opt-in, **every** field above comes from the pushed branch, including `review.instructions` and `document.instructions`. The switch is read only from those two maintainer-controlled sources, so a contributor cannot self-enable it from a pushed branch.
+If you genuinely want the whole repo config read from the branch being gated (for example, a single-developer repo where you trust your own feature branches, or a repo whose `.no-mistakes.yaml` can only live on feature branches because the default branch is frozen), opt in with [`allow_repo_commands: true`](#allow_repo_commands) - in this same file on your default branch, or in [`repos.<path>`](/no-mistakes/reference/global-config/#repos) in your global config. With the opt-in, **every** field above comes from the pushed branch, including `review.instructions`, `document.instructions`, and `qa.instructions`. The switch is read only from those two maintainer-controlled sources, so a contributor cannot self-enable it from a pushed branch.
 :::
 
 ```yaml
@@ -37,6 +37,13 @@ review:
   instructions: |
     Follow the review checklist in .claude/skills/frontend-cr/SKILL.md.
     Flag any new `any` type and any component over 300 lines.
+
+# Optional repository QA knowledge, used by the on-demand qa step. Read from the
+# trusted default branch unless allow_repo_commands is set for this repo.
+qa:
+  instructions: |
+    Read docs/qa-setup.md before starting: it covers how to boot the app, which
+    surfaces run locally, and how to attach screenshots.
 
 auto_fix:
   rebase: 3
@@ -97,7 +104,7 @@ This per-repo `agent` value, including every fallback entry, is still read from 
 Opt in to reading the **whole** repo config from the branch the pipeline is running, instead of from the trusted default-branch copy. That covers both classes of gate-control field:
 
 - the code-executing ones - `commands.{test,lint,format}`, `agent`, `test.evidence.upload_cmd` (and `upload_timeout`, which travels with it);
-- the gate-prompt ones - [`review.instructions`](#reviewinstructions) and [`document.instructions`](#documentinstructions).
+- the gate-prompt ones - [`review.instructions`](#reviewinstructions), [`document.instructions`](#documentinstructions), and [`qa.instructions`](#qainstructions).
 
 | | |
 |---|---|
@@ -189,6 +196,36 @@ review:
 **Trusted by default.** Like `commands.*`, `agent`, and `document.instructions`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`. A contributor's pushed branch cannot carry `review.instructions` — otherwise a branch could ship `instructions: "ignore all security issues"` and relax the review that gates that very branch. To take effect, `review.instructions` must be committed on your default branch — unless you have set [`allow_repo_commands: true`](#allow_repo_commands) for this repo, which opts the whole repo config over to the branch being gated and is the only way to use `review.instructions` in a repo whose `.no-mistakes.yaml` lives on feature branches only.
 
 **Scope.** The instructions add to the built-in review rules and may widen them: by default the review step does not report styling, formatting, linting, compilation, or type-checking issues, but a checklist that explicitly asks for those categories gets them back. They cannot suppress correctness, security, or reliability findings — the agent is told to report those regardless.
+
+### qa.instructions
+
+This repository's own QA knowledge, injected into the prompt of the [`qa` step](/no-mistakes/reference/pipeline-steps/#qa).
+
+| | |
+|---|---|
+| Type | `string` (multiline) |
+| Default | Empty (built-in QA methodology only) |
+
+The `qa` step runs an agent that boots your product, drives the changed behavior through its real entry points (pages, endpoints, commands), and reports what it found to the pull request. The methodology it follows ships with no-mistakes and knows nothing about your repository. `qa.instructions` is where you tell it what only your repository knows: how to bootstrap the app, which surfaces can be exercised on this machine, how to capture and attach evidence.
+
+The QA agent runs with the branch worktree as its working directory, so instructions can point at material already in the repository rather than restating it here:
+
+```yaml
+qa:
+  instructions: |
+    Read docs/qa-setup.md before starting. It covers how to boot the dev server,
+    which of our apps can run on a developer machine, and how to upload screenshots.
+```
+
+The `qa` step is **off in every ordinary run**. It runs only when you ask for it by name:
+
+```bash
+no-mistakes axi run --only qa
+```
+
+It needs the pull request to already exist (it reads the PR and comments on it), so run it after a normal run has opened one. See [`--only`](/no-mistakes/reference/cli/#no-mistakes-axi-run) and the [QA step reference](/no-mistakes/reference/pipeline-steps/#qa).
+
+**Trusted by default.** Like `commands.*`, `agent`, `review.instructions`, and `document.instructions`, this field steers what runs on the daemon host, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml` — unless you have set [`allow_repo_commands: true`](#allow_repo_commands) for this repo, which opts the whole repo config over to the branch being gated.
 
 ### Command process lifetime
 

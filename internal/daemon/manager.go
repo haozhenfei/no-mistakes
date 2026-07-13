@@ -183,7 +183,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		return nil, fmt.Errorf("worktree does not belong to its gate repository")
 	}
 
-	execSteps := m.steps()
+	execSteps := m.execStepsFor(run.OnlySteps)
 	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
 		return nil, err
 	}
@@ -500,12 +500,12 @@ func (m *RunManager) HandleResume(ctx context.Context, repoID, branch, headSHA, 
 	if err != nil {
 		return nil, err
 	}
-	execSteps := m.steps()
 	// The resumed run's skip set is whatever the original run was started with.
 	// It is not re-supplied by the caller (`axi resume` has no --skip flag), so
 	// it comes back off the run row; without it, resume would revive skipped
 	// steps and execute them for real.
 	skipSteps := run.SkipSteps
+	execSteps := m.execStepsFor(run.OnlySteps)
 	skipped := reusableResumeStepNames(m.db, run.ID, execSteps, headSHA, pipeline.ConfigHash(cfg), skipSteps)
 
 	runCtx, cancel := context.WithCancelCause(context.Background())
@@ -833,13 +833,14 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 		baseSHA:   params.Old,
 		trigger:   "push",
 		skipSteps: params.SkipSteps,
+		onlySteps: params.OnlySteps,
 		intent:    params.Intent,
 	})
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
 // optional intent is stamped onto the new run.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent string) (string, error) {
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps, onlySteps []types.StepName, intent string) (string, error) {
 	repo, err := m.loadRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -888,6 +889,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 		baseSHA:   baseSHA,
 		trigger:   "rerun",
 		skipSteps: skipSteps,
+		onlySteps: onlySteps,
 		intent:    intent,
 	})
 }
@@ -896,13 +898,93 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 // for a fix round derived from a watch run; the fix step reads its seed findings
 // through it.
 type runSpec struct {
-	branch      string
-	headSHA     string
-	baseSHA     string
-	trigger     string
+	branch  string
+	headSHA string
+	baseSHA string
+	trigger string
+	// skipSteps and onlySteps are the caller's step selection, at most one of
+	// which is set. resolveSkipSteps turns them into the single skip set that
+	// is persisted on the run row.
 	skipSteps   []types.StepName
+	onlySteps   []types.StepName
 	intent      string
 	parentRunID string
+}
+
+// resolveSkipSteps turns a caller's step selection into the skip set stored on
+// the run row. It is the ONLY place the two on/off stances meet, so every way a
+// gate run is born (push, rerun, watch-derived fix round, wizard) gets the same
+// answer:
+//
+//   - --only <steps>: an exclusive selection. Everything the run could execute
+//     and was not named is skipped.
+//   - otherwise: the caller's --skip set, PLUS every on-demand step. On-demand
+//     steps (qa) are off unless named, so an ordinary push never pays for a QA
+//     pass it did not ask for.
+//
+// The result is what runs.skip_steps records, which is what a later resume reads
+// back - so a resumed run keeps the same shape without the caller repeating the
+// flag. Which on-demand steps the run actually executes is NOT read back from
+// here: that comes from runs.only_steps (see execStepsFor).
+func resolveSkipSteps(skip, only []types.StepName) []types.StepName {
+	if len(only) > 0 {
+		selected := make(map[types.StepName]bool, len(only))
+		for _, step := range only {
+			selected[step] = true
+		}
+		var resolved []types.StepName
+		for _, step := range types.SelectableSteps() {
+			if !selected[step] {
+				resolved = append(resolved, step)
+			}
+		}
+		return resolved
+	}
+	resolved := append([]types.StepName(nil), skip...)
+	for _, step := range types.OnDemandSteps() {
+		if !containsStep(resolved, step) {
+			resolved = append(resolved, step)
+		}
+	}
+	return resolved
+}
+
+// execStepsFor returns the pipeline a run executes: the configured gate steps
+// plus every on-demand step the run SELECTED. An on-demand step the run did not
+// select is left out of the list entirely rather than added as a skipped row, so
+// an ordinary run looks exactly as it did before the step existed.
+//
+// Selection is read from the run's persisted onlySteps, never inferred from the
+// absence of the step in its skip set. The distinction is load-bearing: qa is
+// absent from the skip set both when a run selected it AND on every row written
+// before qa existed, so inferring from absence would append an unrequested QA
+// pass (an agent session, an environment bootstrap, a comment on the user's PR)
+// to any pre-upgrade run that a daemon restart recovers or that `axi resume`
+// continues. A NULL only_steps is unambiguous: that run selected nothing.
+func (m *RunManager) execStepsFor(onlySteps []types.StepName) []pipeline.Step {
+	execSteps := m.steps()
+	for _, step := range steps.OnDemandSteps() {
+		if containsStep(onlySteps, step.Name()) {
+			execSteps = append(execSteps, step)
+		}
+	}
+	return execSteps
+}
+
+// runCanChangePR reports whether a gate run with this skip set could still move
+// the remote branch or the pull request. Only a run that skips BOTH push and pr
+// is inert from the PR's point of view.
+func runCanChangePR(skipSteps []types.StepName) bool {
+	return !containsStep(skipSteps, types.StepPush) || !containsStep(skipSteps, types.StepPR)
+}
+
+func containsStep(steps []types.StepName, step types.StepName) bool {
+	for _, s := range steps {
+		if s == step {
+			return true
+		}
+	}
+	return false
 }
 
 // startRun creates a gate run, sets up a worktree, and launches pipeline
@@ -910,7 +992,7 @@ type runSpec struct {
 // the intent step uses it instead of inferring from transcripts.
 func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) (string, error) {
 	branch, headSHA, baseSHA, trigger := spec.branch, spec.headSHA, spec.baseSHA, spec.trigger
-	skipSteps, intent := spec.skipSteps, spec.intent
+	skipSteps, intent := resolveSkipSteps(spec.skipSteps, spec.onlySteps), spec.intent
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -936,7 +1018,21 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 
 	// Supersede the branch's previous gate run and its watcher: this run is
 	// about to move the head both of them were built on.
-	m.cancelActiveRuns(repo.ID, branch, types.RunKindGate)
+	//
+	// Unless it cannot. A gate run that skips both push and pr never touches
+	// origin or the PR, so the branch's watcher is still watching exactly what
+	// it was watching before - and this run will not derive a replacement, since
+	// deriving one needs a PR its own pr step opened. Cancelling the watcher
+	// would leave the PR permanently unwatched: failing CI would derive no fix
+	// round and nothing would escalate. `axi run --only qa` is precisely this
+	// shape, so it must leave the watcher alone.
+	if runCanChangePR(skipSteps) {
+		m.cancelActiveRuns(repo.ID, branch, types.RunKindGate)
+	} else {
+		m.cancelActiveRunsMatching(repo.ID, branch, func(existing types.RunKind) bool {
+			return !existing.Watch()
+		})
+	}
 
 	// Create run record. The skip set is stored on the row so a later resume of
 	// this run skips the same steps: `axi resume` carries no --skip flag, and a
@@ -946,6 +1042,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 		Kind:        types.RunKindGate,
 		ParentRunID: spec.parentRunID,
 		SkipSteps:   skipSteps,
+		OnlySteps:   spec.onlySteps,
 	})
 	if err != nil {
 		trackStartFailure("create_run")
@@ -1090,7 +1187,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 		ag = agent.NewFallback(created)
 	}
 
-	execSteps := m.steps()
+	execSteps := m.execStepsFor(spec.onlySteps)
 	telemetry.Track("run", telemetry.Fields{
 		"action":      "started",
 		"trigger":     trigger,
@@ -1396,6 +1493,15 @@ func (m *RunManager) HandleCancel(runID string) error {
 //     step this database has ever run died exactly that way, as
 //     `context canceled`, with no record that the PR still owed a check.
 func (m *RunManager) cancelActiveRuns(repoID, branch string, kind types.RunKind) {
+	m.cancelActiveRunsMatching(repoID, branch, func(existing types.RunKind) bool {
+		return supersedes(kind, existing)
+	})
+}
+
+// cancelActiveRunsMatching cancels the branch's active runs whose kind the
+// caller's predicate accepts. It is the shared body of cancelActiveRuns and of
+// the narrower supersede a PR-preserving gate run needs (see startRun).
+func (m *RunManager) cancelActiveRunsMatching(repoID, branch string, supersede func(types.RunKind) bool) {
 	runs, err := m.db.GetRunsByRepo(repoID)
 	if err != nil {
 		slog.Error("failed to query active runs for cancellation", "repo", repoID, "branch", branch, "error", err)
@@ -1410,7 +1516,7 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string, kind types.RunKind)
 		if run.Status != types.RunPending && run.Status != types.RunRunning {
 			continue
 		}
-		if !supersedes(kind, run.Kind) {
+		if !supersede(run.Kind) {
 			continue
 		}
 
@@ -1423,7 +1529,7 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string, kind types.RunKind)
 		}
 
 		cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
-		slog.Info("cancelled active run", "run_id", run.ID, "run_kind", string(run.Kind), "superseded_by", string(kind), "repo_id", repoID, "branch", branch)
+		slog.Info("cancelled active run", "run_id", run.ID, "run_kind", string(run.Kind), "repo_id", repoID, "branch", branch)
 		if done != nil {
 			toWait = append(toWait, done)
 		}

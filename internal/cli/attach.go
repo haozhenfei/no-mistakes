@@ -12,7 +12,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/tui"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/update"
 	"github.com/kunchenguid/no-mistakes/internal/wizard"
 	"github.com/mattn/go-isatty"
@@ -24,7 +23,7 @@ var terminalInteractive = isInteractive
 
 // attachRun is the shared logic for attaching to a pipeline run. It's used by
 // both the root command (bare `no-mistakes`) and the `attach` subcommand.
-func attachRun(ctx context.Context, w io.Writer, runID string, rootDefault bool, autoYes bool, skipSteps []types.StepName) error {
+func attachRun(ctx context.Context, w io.Writer, runID string, rootDefault bool, autoYes bool, selection stepSelection) error {
 	p, d, err := openResources()
 	if err != nil {
 		return err
@@ -107,12 +106,12 @@ func attachRun(ctx context.Context, w io.Writer, runID string, rootDefault bool,
 			var wErr error
 			if autoYes {
 				if interactive {
-					res, wErr = runWizardAutoVisible(ctx, p, state, skipSteps, waitFn)
+					res, wErr = runWizardAutoVisible(ctx, p, state, selection, waitFn)
 				} else {
-					res, wErr = runWizardAuto(ctx, p, state, skipSteps, waitFn)
+					res, wErr = runWizardAuto(ctx, p, state, selection, waitFn)
 				}
 			} else {
-				res, wErr = runWizardWithSkip(ctx, p, state, skipSteps, waitFn)
+				res, wErr = runWizardWithSkip(ctx, p, state, selection, waitFn)
 			}
 			if wErr != nil {
 				return wErr
@@ -137,8 +136,8 @@ func attachRun(ctx context.Context, w io.Writer, runID string, rootDefault bool,
 			return nil
 		}
 	}
-	if len(skipSteps) > 0 && !startedViaWizard {
-		return fmt.Errorf("--skip only applies when starting a new pipeline run")
+	if !selection.empty() && !startedViaWizard {
+		return fmt.Errorf("--skip and --only only apply when starting a new pipeline run")
 	}
 
 	telemetry.Pageview("/tui", telemetry.Fields{
@@ -246,7 +245,7 @@ If no run ID is specified, attaches to the active run for the current repo.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackCommand("attach", func() error {
-				return attachRun(cmd.Context(), cmd.OutOrStdout(), runID, false, false, nil)
+				return attachRun(cmd.Context(), cmd.OutOrStdout(), runID, false, false, stepSelection{})
 			})
 		},
 	}

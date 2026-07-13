@@ -289,3 +289,11 @@ func (h *Host) ListReviewThreads(_ context.Context, _ *scm.PR) ([]scm.ReviewThre
 func (h *Host) GetReviewState(_ context.Context, _ *scm.PR) (scm.ReviewState, error) {
 	return "", scm.ErrUnsupported
 }
+
+// PostPRComment is not implemented for this provider. Capabilities().PRComments
+// is false, so callers (today: the qa step) report that the platform cannot
+// receive the comment rather than silently dropping it. Wiring it means
+// verifying the CLI/API's comment surface against a live PR first.
+func (h *Host) PostPRComment(_ context.Context, _ *scm.PR, _ string) error {
+	return scm.ErrUnsupported
+}

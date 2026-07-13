@@ -129,6 +129,9 @@ func fakeGHHandler(args []string) {
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "edit" {
 		os.Exit(0)
 	}
+	if len(args) >= 2 && args[0] == "pr" && args[1] == "comment" {
+		os.Exit(0)
+	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
 		fmt.Println("https://github.com/test/repo/pull/99")
 		os.Exit(0)

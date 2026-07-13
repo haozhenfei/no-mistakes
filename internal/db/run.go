@@ -44,7 +44,15 @@ type Run struct {
 	// later resume of the same run skips the same steps instead of reviving
 	// them. Persisted as a JSON array of step names; nil when nothing is
 	// skipped.
-	SkipSteps       []types.StepName
+	SkipSteps []types.StepName
+	// OnlySteps is the exclusive selection the run was started with (`--only`):
+	// the run executes these and skips everything else. It is persisted
+	// SEPARATELY from SkipSteps because a skip list cannot express a positive
+	// selection - an on-demand step (qa) is absent from the skip set both when
+	// it was selected and when the row predates the step existing. nil means the
+	// run selected nothing, which is what every ordinary run and every row
+	// written before --only shipped says.
+	OnlySteps       []types.StepName
 	Intent          *string
 	IntentSource    *string
 	IntentSessionID *string
@@ -53,43 +61,48 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, COALESCE(kind, 'gate'), parent_run_id, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), skip_steps, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, COALESCE(kind, 'gate'), parent_run_id, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), skip_steps, only_steps, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
-	var skipSteps *string
+	var skipSteps, onlySteps *string
 	if err := row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
 		&r.Kind, &r.ParentRunID,
-		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS, &skipSteps,
+		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS, &skipSteps, &onlySteps,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return err
 	}
-	steps, err := decodeSkipSteps(skipSteps)
+	steps, err := decodeStepNames(skipSteps)
 	if err != nil {
-		return err
+		return fmt.Errorf("skip steps: %w", err)
 	}
 	r.SkipSteps = steps
+	only, err := decodeStepNames(onlySteps)
+	if err != nil {
+		return fmt.Errorf("only steps: %w", err)
+	}
+	r.OnlySteps = only
 	return nil
 }
 
-// encodeSkipSteps renders a skip set for storage. An empty set is stored as
-// SQL NULL so old rows and "nothing skipped" are the same thing.
-func encodeSkipSteps(steps []types.StepName) (any, error) {
+// encodeStepNames renders a step-name set for storage. An empty set is stored as
+// SQL NULL so old rows and "nothing here" are the same thing.
+func encodeStepNames(steps []types.StepName) (any, error) {
 	if len(steps) == 0 {
 		return nil, nil
 	}
 	data, err := json.Marshal(steps)
 	if err != nil {
-		return nil, fmt.Errorf("encode skip steps: %w", err)
+		return nil, fmt.Errorf("encode step names: %w", err)
 	}
 	return string(data), nil
 }
 
-func decodeSkipSteps(raw *string) ([]types.StepName, error) {
+func decodeStepNames(raw *string) ([]types.StepName, error) {
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return nil, nil
 	}
@@ -111,6 +124,9 @@ type RunOptions struct {
 	Kind        types.RunKind
 	ParentRunID string
 	SkipSteps   []types.StepName
+	// OnlySteps is the run's exclusive selection; see Run.OnlySteps for why it
+	// is stored alongside SkipSteps rather than derived from it.
+	OnlySteps []types.StepName
 }
 
 // InsertRun creates a new gate run record with no skipped steps.
@@ -144,23 +160,31 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 		Status:    types.RunPending,
 		Kind:      kind,
 		SkipSteps: opts.SkipSteps,
+		OnlySteps: opts.OnlySteps,
 		CreatedAt: ts,
 		UpdatedAt: ts,
 	}
 	if len(opts.SkipSteps) == 0 {
 		r.SkipSteps = nil
 	}
+	if len(opts.OnlySteps) == 0 {
+		r.OnlySteps = nil
+	}
 	if opts.ParentRunID != "" {
 		parent := opts.ParentRunID
 		r.ParentRunID = &parent
 	}
-	encoded, err := encodeSkipSteps(r.SkipSteps)
+	encodedSkip, err := encodeStepNames(r.SkipSteps)
+	if err != nil {
+		return nil, err
+	}
+	encodedOnly, err := encodeStepNames(r.OnlySteps)
 	if err != nil {
 		return nil, err
 	}
 	_, err = d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, kind, parent_run_id, skip_steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.Kind, r.ParentRunID, encoded, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, kind, parent_run_id, skip_steps, only_steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.Kind, r.ParentRunID, encodedSkip, encodedOnly, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

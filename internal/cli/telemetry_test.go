@@ -211,7 +211,7 @@ func TestAttachTracksTUIPageview(t *testing.T) {
 	runTUI = func(string, *ipc.Client, *ipc.RunInfo, string) error { return nil }
 	defer func() { runTUI = prevRunTUI }()
 
-	if err := attachRun(context.Background(), io.Discard, run.ID, false, false, nil); err != nil {
+	if err := attachRun(context.Background(), io.Discard, run.ID, false, false, stepSelection{}); err != nil {
 		t.Fatalf("attachRun() error = %v", err)
 	}
 

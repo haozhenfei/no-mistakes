@@ -812,8 +812,11 @@ func TestResumeDoesNotReviveSkippedStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stored.SkipSteps) != 1 || stored.SkipSteps[0] != types.StepReview {
-		t.Fatalf("persisted skip steps = %v, want [review]", stored.SkipSteps)
+	// The caller asked to skip review; qa joins it because on-demand steps are
+	// off unless named (see resolveSkipSteps), and the persisted set is what a
+	// resume reads back.
+	if !hasSteps(stored.SkipSteps, types.StepReview, types.StepQA) {
+		t.Fatalf("persisted skip steps = %v, want [review qa]", stored.SkipSteps)
 	}
 
 	if err := d.UpdateRunErrorStatus(first.RunID, types.RunInterruptReasonDaemonCrashed, types.RunInterrupted); err != nil {

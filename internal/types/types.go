@@ -59,6 +59,10 @@ const (
 	StepPush     StepName = "push"
 	StepPR       StepName = "pr"
 
+	// StepQA is an on-demand step: it never runs unless the caller names it
+	// (`--only qa`). See OnDemandSteps.
+	StepQA StepName = "qa"
+
 	// StepWatch is the only step of a watch run: it polls the PR the parent
 	// gate run opened and converges on merged/closed, a fix round, or an
 	// escalation to a human.
@@ -131,6 +135,8 @@ func (s StepName) Order() int {
 		return 9
 	case StepPR:
 		return 10
+	case StepQA:
+		return 12 // on-demand; runs after the PR exists
 	case StepWatch:
 		return 1
 	case StepCI:
@@ -151,6 +157,37 @@ func WatchSteps() []StepName {
 	return []StepName{StepWatch}
 }
 
+// OnDemandSteps returns the gate steps that are OFF by default and run only
+// when a caller names them (`--only qa`). They are deliberately not part of
+// GateSteps: a push, a rerun, or a watch-derived fix round must never pay for
+// them. The run's skip set carries the decision (see SelectableSteps), so it
+// survives a resume like every other skip.
+//
+// Today the only member is qa, which drives a full product-level QA pass
+// against the MR the gate run just opened. It costs an agent session, an
+// environment bootstrap, and a real browser; measured on one CSS-only MR that
+// was +24min and +400k tokens for one finding, so it is on-demand by design.
+func OnDemandSteps() []StepName {
+	return []StepName{StepQA}
+}
+
+// SelectableSteps returns every step a caller may name in --only: the gate
+// sequence plus the on-demand steps. Watch steps are excluded - a watch run is
+// derived by the daemon, never requested step-by-step.
+func SelectableSteps() []StepName {
+	return append(GateSteps(), OnDemandSteps()...)
+}
+
+// IsOnDemandStep reports whether a step only runs when explicitly selected.
+func IsOnDemandStep(s StepName) bool {
+	for _, step := range OnDemandSteps() {
+		if step == s {
+			return true
+		}
+	}
+	return false
+}
+
 // StepsForKind returns the step sequence a run of the given kind executes.
 func StepsForKind(kind RunKind) []StepName {
 	if kind.Watch() {
@@ -163,7 +200,7 @@ func StepsForKind(kind RunKind) []StepName {
 // kinds. Use it to validate user-supplied step names and to enumerate steps for
 // reporting; use GateSteps/WatchSteps when you mean one run's sequence.
 func KnownSteps() []StepName {
-	return append(GateSteps(), WatchSteps()...)
+	return append(SelectableSteps(), WatchSteps()...)
 }
 
 // StepStatus represents the lifecycle state of a pipeline step.

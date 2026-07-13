@@ -100,6 +100,8 @@ You can't reorder steps. You *can*:
 - Ignore paths during review and documentation checks.
 - Disable or tune transcript-based intent extraction when intent is not supplied directly.
 - Skip steps for one run with `no-mistakes --skip <steps>`, `git push -o no-mistakes.skip=<steps>`, `no-mistakes axi run --skip <steps>`, or from the TUI.
+- Run a single step for one run with `--only <steps>` (the complement of `--skip`), e.g. `no-mistakes axi run --only review`.
+- Ask for the on-demand [QA step](/no-mistakes/reference/pipeline-steps/#qa) with `no-mistakes axi run --only qa`. QA boots the product and drives the changed behavior through its real entry points, then reports to the pull request. It is off in every ordinary run - it needs the PR to already exist, and one pass costs an environment bootstrap - so naming it is the only way it runs. Point it at your repository's setup knowledge with [`qa.instructions`](/no-mistakes/reference/repo-config/#qainstructions).
 
 See [Configuration](/no-mistakes/guides/configuration/).
 
@@ -108,5 +110,6 @@ See [Configuration](/no-mistakes/guides/configuration/).
 - The step order.
 - Skipping specific steps permanently - per-run skips are allowed, but the pipeline itself always has all nine.
 - Adding new steps.
+- Making QA part of every run. It is on-demand by design.
 
 This is intentional. The pipeline is opinionated so that "passed the gate" means the same thing across repos.

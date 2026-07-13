@@ -219,6 +219,38 @@ Creates or updates a pull request.
 
 Stores the PR URL in the database and streams it to the TUI.
 
+## QA
+
+Exercises the product the way a human QA engineer would: boots the repository, drives the changed behavior through its real entry points (pages, endpoints, commands), and reports whether the pull request achieves its stated goal.
+
+**On demand only.** QA is not part of an ordinary run. It runs when a caller names it:
+
+```sh
+no-mistakes axi run --only qa
+```
+
+It runs after the PR step because the pull request is both its input and its output: it reads the PR and comments on it. Run it once a normal run has opened one. See [`--only`](/no-mistakes/reference/cli/#no-mistakes-axi-run).
+
+**Fails when:**
+- The branch has no pull request (nothing to QA, and nothing to report to)
+- The commit being QA'd is not the one the pull request shows — `--only qa` does not push, so unpushed local commits would have QA report on code the PR does not contain. Run the full pipeline first.
+- The provider CLI is unavailable or unauthenticated
+- The agent returns no report
+
+It fails rather than skips, because a skipped QA step would report success for a pass that never looked at anything.
+
+**Behavior:**
+- Resolves the pull request from the run's recorded PR URL, falling back to the branch's open PR on the host (the `--only qa` case, where the PR step did not run)
+- Runs one agent pass in the branch worktree, following a four-phase methodology: understand the change and name each entry point, bootstrap the environment with the repository's own documented commands, exercise the changed behavior for real, then report
+- The agent does not run the test suite, linters, or type checkers, and does not review code — other steps own those
+- Returns one of four verdicts: `PASS`, `PASS_WITH_ISSUES`, `FAIL`, `PARTIAL`. Coverage and correctness are separate: everything that ran passing, but only 3 of 9 entry points reached, is `PARTIAL`
+- **Anything but a clean `PASS` parks the run** for a decision. The verdict gates on its own, not only the issue list, so a `FAIL` written in prose cannot finish green
+- Every entry point the agent could not exercise is reported as a finding, so an unverified pass never looks like a verified one
+- Publishes the report as a comment on the pull request for every verdict except a clean `PASS`. A clean `PASS` is recorded on the run only: on hosts that model comment threads, an unresolved thread makes a watch run park the PR, so a PASS comment would park the very PR it just cleared
+- Findings never auto-fix. QA reports what the product did; deciding what to change in response is a product decision, so findings park for a human — the same stance as `auto_fix.review: 0`
+
+**Configure it with** [`qa.instructions`](/no-mistakes/reference/repo-config/#qainstructions): the methodology above ships with no-mistakes and knows nothing about your repository, so that field is where you point the agent at how to boot your app, which surfaces run locally, and how to capture evidence.
+
 ## Watch
 
 Monitors the PR after the gate run has ended. It is the only step of a watch run, holds no worktree, and invokes no agent.
