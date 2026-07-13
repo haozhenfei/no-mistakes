@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -53,7 +54,11 @@ func TestStepNameOrder(t *testing.T) {
 		{StepPush, 9},
 		{StepPR, 10},
 		{StepWatch, 1},
-		{StepName("qa"), 0},
+		// qa runs after the PR exists, so it sorts after every gate step. The
+		// name was used once before, by a pre-split step that was folded into
+		// test; a historical step_results row named "qa" now sorts here, which
+		// only affects how that stale row renders.
+		{StepQA, 12},
 		{StepName("unknown"), 0},
 	}
 
@@ -71,5 +76,42 @@ func TestStepNameUnmarshalJSON_LegacyBabysit(t *testing.T) {
 	}
 	if step != StepCI {
 		t.Fatalf("step = %q, want %q", step, StepCI)
+	}
+}
+
+// The gate sequence must not grow an on-demand step: GateSteps is what an
+// ordinary push executes, and qa is off unless a caller names it.
+func TestGateStepsExcludesOnDemandSteps(t *testing.T) {
+	for _, step := range GateSteps() {
+		if IsOnDemandStep(step) {
+			t.Fatalf("GateSteps() contains the on-demand step %q; an ordinary run would pay for it", step)
+		}
+	}
+	if len(GateSteps()) != 10 {
+		t.Fatalf("GateSteps() = %v, want the unchanged ten-step gate sequence", GateSteps())
+	}
+}
+
+// SelectableSteps is what --only validates against: every step a gate run can
+// execute, on-demand ones included. Watch is not selectable - a watch run is
+// derived by the daemon, never requested step by step.
+func TestSelectableStepsCoversGateAndOnDemandButNotWatch(t *testing.T) {
+	selectable := SelectableSteps()
+	for _, step := range append(GateSteps(), OnDemandSteps()...) {
+		if !slices.Contains(selectable, step) {
+			t.Fatalf("SelectableSteps() is missing %q", step)
+		}
+	}
+	for _, step := range WatchSteps() {
+		if slices.Contains(selectable, step) {
+			t.Fatalf("SelectableSteps() contains the watch step %q", step)
+		}
+	}
+}
+
+// KnownSteps validates --skip, and must still accept every name a run can carry.
+func TestKnownStepsIncludesOnDemandSteps(t *testing.T) {
+	if !slices.Contains(KnownSteps(), StepQA) {
+		t.Fatalf("KnownSteps() = %v, want it to include qa", KnownSteps())
 	}
 }

@@ -60,6 +60,7 @@ func outcomeFor(status string) string {
 func newAxiRunCmd() *cobra.Command {
 	var autoYes bool
 	var skipValue string
+	var onlyValue string
 	var intent string
 
 	cmd := &cobra.Command{
@@ -73,6 +74,9 @@ func newAxiRunCmd() *cobra.Command {
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
+			"--only runs exactly the named steps and skips the rest (`--only qa` runs the\n" +
+			"QA pass alone against the branch's existing PR; `--only review` reviews without\n" +
+			"testing or pushing). It cannot be combined with --skip.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary or a configured\n" +
 			"ACP target through acpx, and fails before the first step when none can run.\n\n" +
@@ -85,18 +89,19 @@ func newAxiRunCmd() *cobra.Command {
 				"auto_yes":   autoYes,
 				"has_intent": strings.TrimSpace(intent) != "",
 				"has_skip":   strings.TrimSpace(skipValue) != "",
+				"has_only":   strings.TrimSpace(onlyValue) != "",
 			}, func() error {
-				skipSteps, err := parseSkipSteps(skipValue)
+				selection, err := parseStepSelection(skipValue, onlyValue)
 				if err != nil {
-					return emitError(cmd, 2, err.Error(),
-						"Valid steps: intent, rebase, review, test, verify, document, lint, push, pr, ci")
+					return emitError(cmd, 2, err.Error(), stepSelectionHelp())
 				}
-				return runAxiRun(cmd, autoYes, skipSteps, intent)
+				return runAxiRun(cmd, autoYes, selection, intent)
 			})
 		},
 	}
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
+	cmd.Flags().StringVar(&onlyValue, "only", "", "comma-separated pipeline steps to run exclusively (skips every other step; not combinable with --skip)")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	return cmd
 }
@@ -170,7 +175,7 @@ func runAxiResume(cmd *cobra.Command, runID string, autoYes bool) error {
 	return renderDriveResult(cmd, final, ciReady)
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent string) error {
+func runAxiRun(cmd *cobra.Command, autoYes bool, selection stepSelection, intent string) error {
 	ctx := cmd.Context()
 	env, err := openAxiRunEnv()
 	if err != nil {
@@ -213,7 +218,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 			return guard(cmd)
 		}
 		var err error
-		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent)
+		runID, err = triggerRun(ctx, env, branch, headSHA, selection, intent)
 		if err != nil {
 			return emitError(cmd, 1, err.Error(), gatePushHelp(err)...)
 		}
@@ -290,8 +295,8 @@ func preflightGuard(ctx context.Context, env *axiEnv, branch string) func(*cobra
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent string) (string, error) {
-	pushOptions := formatSkipPushOptions(skipSteps)
+func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, selection stepSelection, intent string) (string, error) {
+	pushOptions := selection.pushOptions()
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
@@ -313,7 +318,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	// No run appeared: the push was likely up-to-date. Rerun the latest gate
 	// head so `axi run` is still useful when there are no new commits.
 	var rr ipc.RerunResult
-	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent), &rr); err != nil {
+	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, selection, intent), &rr); err != nil {
 		return "", fmt.Errorf("no run started for %q: %v", branch, err)
 	}
 	return rr.RunID, nil
@@ -406,8 +411,14 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 	return &ipc.GetActiveRunParams{RepoID: repoID, Branch: branch}
 }
 
-func rerunParams(repoID, branch string, skipSteps []types.StepName, intent string) *ipc.RerunParams {
-	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent}
+func rerunParams(repoID, branch string, selection stepSelection, intent string) *ipc.RerunParams {
+	return &ipc.RerunParams{
+		RepoID:    repoID,
+		Branch:    branch,
+		SkipSteps: selection.skip,
+		OnlySteps: selection.only,
+		Intent:    intent,
+	}
 }
 
 // driveRun polls a run until it reaches an approval gate, a terminal state, or

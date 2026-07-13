@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS runs (
     awaiting_agent_since INTEGER,
     parked_ms            INTEGER,
     skip_steps           TEXT,
+    only_steps           TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -159,6 +160,15 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN awaiting_agent_since INTEGER`,
 	`ALTER TABLE runs ADD COLUMN parked_ms INTEGER`,
 	`ALTER TABLE runs ADD COLUMN skip_steps TEXT`,
+	// only_steps records the exclusive selection a run was started with
+	// (`--only`). It has to be its own column: skip_steps cannot express it.
+	// An on-demand step (qa) is "selected" exactly when it is ABSENT from the
+	// skip set - but it is also absent from every row written before the step
+	// existed, so inferring selection from the skip set alone would append an
+	// unrequested QA pass to those rows on resume or crash recovery. A NULL
+	// only_steps says "this run selected nothing", which is the truth for every
+	// legacy row and every ordinary run.
+	`ALTER TABLE runs ADD COLUMN only_steps TEXT`,
 	// Every row written before the gate/watch split is a gate run: the
 	// pre-split pipeline had no other kind. The NOT NULL DEFAULT backfills
 	// them in place, so an existing database keeps loading unchanged.

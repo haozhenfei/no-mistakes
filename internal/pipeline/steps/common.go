@@ -121,6 +121,19 @@ var reviewFindingsSchema = json.RawMessage(`{
 	"required": ["findings", "risk_level", "risk_rationale"]
 }`)
 
+// OnDemandSteps returns the gate steps that run ONLY when a caller names them
+// (`no-mistakes axi run --only qa`). They are deliberately absent from AllSteps:
+// the daemon appends the ones a run selected (RunManager.execStepsFor), so an
+// ordinary push carries no row for them at all.
+//
+// Today the only member is QAStep. It runs after the PR exists because that is
+// its input (it reads the run's PR URL and reports back to the MR), and one QA
+// pass costs an environment bootstrap plus a real browser session - too much to
+// spend on every push. See types.OnDemandSteps for the step-name side.
+func OnDemandSteps() []pipeline.Step {
+	return []pipeline.Step{&QAStep{}}
+}
+
 // AllSteps returns the gate pipeline: everything up to and including the PR.
 // Post-PR monitoring is a watch run's job (see WatchSteps), so this sequence no
 // longer ends in a blocking CI poll that holds the worktree for days.

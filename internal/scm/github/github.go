@@ -132,7 +132,28 @@ func repoOwner(slug string) string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitHub }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewThreads: true, ReviewState: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewThreads: true, ReviewState: true, PRComments: true}
+}
+
+// PostPRComment posts a top-level issue comment on the PR. The body goes over
+// stdin (--body-file -), not argv: a QA report carries command output and
+// screenshots and would otherwise hit the exec argument limit.
+func (h *Host) PostPRComment(ctx context.Context, pr *scm.PR, body string) error {
+	if pr == nil {
+		return fmt.Errorf("no pull request to comment on")
+	}
+	id := pr.Number
+	if id == "" {
+		id = pr.URL
+	}
+	args := append([]string{"pr", "comment", id}, h.repoArgs()...)
+	args = append(args, "--body-file", "-")
+	cmd := h.cmd(ctx, "gh", args...)
+	cmd.Stdin = strings.NewReader(body)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gh pr comment: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 func (h *Host) Available(ctx context.Context) error {

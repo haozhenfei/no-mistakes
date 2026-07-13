@@ -52,8 +52,19 @@ machine-readable [TOON](https://toonformat.dev) to stdout and progress to stderr
 
 When the user invokes ` + "`/no-mistakes`" + `, report the outcome at the end. If the user
 asks for something specific, translate that request into the matching ` + "`axi run`" + `
-flags yourself - for example, "skip the lint step" becomes ` + "`--skip=lint`" + `. Run
+flags yourself - for example, "skip the lint step" becomes ` + "`--skip=lint`" + `, and
+"just re-review this" becomes ` + "`--only=review`" + `. Run
 ` + "`no-mistakes axi run --help`" + ` to see the available flags.
+
+` + "`--only=<steps>`" + ` runs exactly the steps you name and skips every other one
+(it cannot be combined with ` + "`--skip`" + `). Two uses matter:
+
+- ` + "`--only=qa`" + ` runs the QA step alone: an agent boots the product, drives the
+  changed behavior through its real entry points, and reports to the pull
+  request. QA is off in every ordinary run - it is expensive, and it needs a PR
+  to already exist - so ` + "`--only=qa`" + ` is the way to ask for it. Run it after a
+  normal run has opened the PR. Only do this when the user asks for QA.
+- ` + "`--only=review`" + ` (or any other single step) re-runs that step alone.
 
 ## Two ways to invoke
 

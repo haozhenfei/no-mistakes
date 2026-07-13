@@ -89,7 +89,30 @@ func isWindowsDrivePath(raw string) bool {
 func (h *Host) Provider() scm.Provider { return scm.ProviderCodebase }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewThreads: true, ReviewState: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewThreads: true, ReviewState: true, PRComments: true}
+}
+
+// PostPRComment posts a top-level comment on the MR via
+// `bytedcli codebase mr comment create <n> -b <body>`. bytedcli takes the body
+// on argv (-b), with no stdin form, so callers must keep the body within the
+// OS argument limit - the qa step truncates its report for exactly this reason.
+func (h *Host) PostPRComment(ctx context.Context, pr *scm.PR, body string) error {
+	if pr == nil || strings.TrimSpace(pr.Number) == "" {
+		return fmt.Errorf("no merge request to comment on")
+	}
+	args := h.repoArgs([]string{"codebase", "mr", "comment", "create", pr.Number, "-b", body})
+	cmd := h.cmd(ctx, "bytedcli", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = strings.TrimSpace(stdout.String())
+		}
+		return fmt.Errorf("bytedcli codebase mr comment create: %s: %w", msg, err)
+	}
+	return nil
 }
 
 // repoArgs appends -R <repo> when a repo slug is known. When it is empty,

@@ -56,6 +56,16 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			onlySteps, err := parseOnlyPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
+			// The transport must reject what the flags reject. Otherwise a push
+			// carrying both no-mistakes.skip and no-mistakes.only reaches the
+			// daemon, which resolves `only` and silently drops the skip set.
+			if len(skipSteps) > 0 && len(onlySteps) > 0 {
+				return fmt.Errorf("push options no-mistakes.skip and no-mistakes.only cannot be combined: only already skips every step it does not name")
+			}
 			intent, err := parseIntentPushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -83,6 +93,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				Old:       oldSHA,
 				New:       newSHA,
 				SkipSteps: skipSteps,
+				OnlySteps: onlySteps,
 				Intent:    intent,
 			}, &result)
 		},
@@ -176,6 +187,14 @@ func parseIntentPushOptions(options []string) (string, error) {
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {
+	return formatStepPushOptions("no-mistakes.skip=", steps)
+}
+
+func formatOnlyPushOptions(steps []types.StepName) []string {
+	return formatStepPushOptions(onlyPushOptionPrefix, steps)
+}
+
+func formatStepPushOptions(prefix string, steps []types.StepName) []string {
 	if len(steps) == 0 {
 		return nil
 	}
@@ -183,16 +202,117 @@ func formatSkipPushOptions(steps []types.StepName) []string {
 	for _, step := range dedupeSteps(steps) {
 		parts = append(parts, string(step))
 	}
-	return []string{"no-mistakes.skip=" + strings.Join(parts, ",")}
+	return []string{prefix + strings.Join(parts, ",")}
+}
+
+// onlyPushOptionPrefix carries an exclusive step selection through a git push,
+// the transport `axi run` uses to start a run. It is the complement of
+// no-mistakes.skip: the daemon turns it into the run's skip set.
+const onlyPushOptionPrefix = "no-mistakes.only="
+
+func parseOnlyPushOptions(options []string) ([]types.StepName, error) {
+	var steps []types.StepName
+	for _, option := range options {
+		value, ok := strings.CutPrefix(option, onlyPushOptionPrefix)
+		if !ok {
+			continue
+		}
+		parsed, err := parseOnlySteps(value)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, parsed...)
+	}
+	return dedupeSteps(steps), nil
+}
+
+// parseOnlySteps validates an --only selection. Unlike --skip it accepts only
+// steps a gate run can execute, so `--only watch` is rejected rather than
+// producing a run with every step skipped.
+func parseOnlySteps(value string) ([]types.StepName, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	var steps []types.StepName
+	for _, part := range strings.Split(value, ",") {
+		step := types.StepName(strings.TrimSpace(part))
+		if !selectableStep(step) {
+			return nil, fmt.Errorf("unknown step %q", step)
+		}
+		steps = append(steps, step)
+	}
+	return dedupeSteps(steps), nil
 }
 
 func validStep(step types.StepName) bool {
-	for _, known := range types.KnownSteps() {
-		if step == known {
+	return containsStepName(types.KnownSteps(), step)
+}
+
+func selectableStep(step types.StepName) bool {
+	return containsStepName(types.SelectableSteps(), step)
+}
+
+func containsStepName(known []types.StepName, step types.StepName) bool {
+	for _, k := range known {
+		if step == k {
 			return true
 		}
 	}
 	return false
+}
+
+// stepSelectionFlagsError rejects --skip and --only together: they are two ways
+// to describe the same set, and honoring both would make the result depend on
+// an evaluation order the user cannot see.
+func stepSelectionFlagsError(skipValue, onlyValue string) error {
+	if strings.TrimSpace(skipValue) != "" && strings.TrimSpace(onlyValue) != "" {
+		return fmt.Errorf("--skip and --only cannot be combined: --only already skips every step it does not name")
+	}
+	return nil
+}
+
+// stepSelection is what a caller asked a new run to execute: either a set of
+// steps to skip (--skip) or an exclusive set to run (--only). The daemon
+// resolves it into the run's persisted skip set, so only one of the two is ever
+// populated.
+type stepSelection struct {
+	skip []types.StepName
+	only []types.StepName
+}
+
+// parseStepSelection validates --skip/--only and rejects them together.
+func parseStepSelection(skipValue, onlyValue string) (stepSelection, error) {
+	if err := stepSelectionFlagsError(skipValue, onlyValue); err != nil {
+		return stepSelection{}, err
+	}
+	skip, err := parseSkipSteps(skipValue)
+	if err != nil {
+		return stepSelection{}, err
+	}
+	only, err := parseOnlySteps(onlyValue)
+	if err != nil {
+		return stepSelection{}, err
+	}
+	return stepSelection{skip: skip, only: only}, nil
+}
+
+// pushOptions renders the selection for the git push that starts a run.
+func (s stepSelection) pushOptions() []string {
+	return append(formatSkipPushOptions(s.skip), formatOnlyPushOptions(s.only)...)
+}
+
+// empty reports whether the caller asked for the default pipeline.
+func (s stepSelection) empty() bool {
+	return len(s.skip) == 0 && len(s.only) == 0
+}
+
+// stepSelectionHelp lists the step names --skip and --only accept.
+func stepSelectionHelp() string {
+	names := make([]string, 0, len(types.SelectableSteps()))
+	for _, step := range types.SelectableSteps() {
+		names = append(names, string(step))
+	}
+	return "Valid steps: " + strings.Join(names, ", ")
 }
 
 func dedupeSteps(steps []types.StepName) []types.StepName {

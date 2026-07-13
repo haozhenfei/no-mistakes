@@ -70,6 +70,12 @@ type PushReceivedParams struct {
 	Old       string           `json:"old"`
 	New       string           `json:"new"`
 	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
+	// OnlySteps, when non-empty, is an exclusive selection: the run executes
+	// these steps and skips every other one. It is what --only sends, and the
+	// daemon resolves it into the run's persisted skip set (see
+	// RunManager.startRun). SkipSteps and OnlySteps are mutually exclusive; the
+	// CLI rejects both together.
+	OnlySteps []types.StepName `json:"only_steps,omitempty"`
 	Intent    string           `json:"intent,omitempty"`
 }
 
@@ -112,6 +118,9 @@ type RerunParams struct {
 	RepoID    string           `json:"repo_id"`
 	Branch    string           `json:"branch"`
 	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
+	// OnlySteps mirrors PushReceivedParams.OnlySteps: an exclusive selection
+	// that the daemon resolves into the new run's skip set.
+	OnlySteps []types.StepName `json:"only_steps,omitempty"`
 	Intent    string           `json:"intent,omitempty"`
 }
 

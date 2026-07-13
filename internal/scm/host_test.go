@@ -138,6 +138,10 @@ func (fakeHost) GetReviewState(context.Context, *PR) (ReviewState, error) {
 	return "", ErrUnsupported
 }
 
+func (fakeHost) PostPRComment(context.Context, *PR, string) error {
+	return ErrUnsupported
+}
+
 func TestUnresolvedThreads(t *testing.T) {
 	t.Parallel()
 	threads := []ReviewThread{

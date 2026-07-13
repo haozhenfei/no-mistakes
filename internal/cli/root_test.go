@@ -45,7 +45,7 @@ func TestRootYesRunsWizardNonInteractively(t *testing.T) {
 	}
 
 	prevAuto := runWizardAuto
-	runWizardAuto = func(ctx context.Context, p *paths.Paths, state *repoState, _ []types.StepName, _ waitForRunFunc) (wizard.Result, error) {
+	runWizardAuto = func(ctx context.Context, p *paths.Paths, state *repoState, _ stepSelection, _ waitForRunFunc) (wizard.Result, error) {
 		if state == nil {
 			t.Fatal("expected repo state")
 		}
@@ -101,8 +101,8 @@ func TestRootSkipPassesStepsToWizard(t *testing.T) {
 
 	prevAuto := runWizardAuto
 	var gotSkip []types.StepName
-	runWizardAuto = func(ctx context.Context, p *paths.Paths, state *repoState, skipSteps []types.StepName, _ waitForRunFunc) (wizard.Result, error) {
-		gotSkip = append([]types.StepName(nil), skipSteps...)
+	runWizardAuto = func(ctx context.Context, p *paths.Paths, state *repoState, selection stepSelection, _ waitForRunFunc) (wizard.Result, error) {
+		gotSkip = append([]types.StepName(nil), selection.skip...)
 		if _, err := d.InsertRun(repo.ID, "feat/auto", "head1234", "base5678"); err != nil {
 			return wizard.Result{}, err
 		}
@@ -156,7 +156,7 @@ func TestRootYesUsesVisibleWizardWhenInteractive(t *testing.T) {
 
 	prevVisible := runWizardAutoVisible
 	visible := false
-	runWizardAutoVisible = func(ctx context.Context, p *paths.Paths, state *repoState, _ []types.StepName, _ waitForRunFunc) (wizard.Result, error) {
+	runWizardAutoVisible = func(ctx context.Context, p *paths.Paths, state *repoState, _ stepSelection, _ waitForRunFunc) (wizard.Result, error) {
 		visible = true
 		if state == nil {
 			t.Fatal("expected repo state")
@@ -169,7 +169,7 @@ func TestRootYesUsesVisibleWizardWhenInteractive(t *testing.T) {
 	defer func() { runWizardAutoVisible = prevVisible }()
 
 	prevAuto := runWizardAuto
-	runWizardAuto = func(context.Context, *paths.Paths, *repoState, []types.StepName, waitForRunFunc) (wizard.Result, error) {
+	runWizardAuto = func(context.Context, *paths.Paths, *repoState, stepSelection, waitForRunFunc) (wizard.Result, error) {
 		t.Fatal("expected interactive -y path to show the wizard instead of using headless auto mode")
 		return wizard.Result{}, nil
 	}
@@ -213,7 +213,7 @@ func TestRootYesFailsWhenWizardPushProducesNoRun(t *testing.T) {
 	startTestDaemon(t, p, d)
 
 	prevAuto := runWizardAuto
-	runWizardAuto = func(ctx context.Context, p *paths.Paths, state *repoState, _ []types.StepName, _ waitForRunFunc) (wizard.Result, error) {
+	runWizardAuto = func(ctx context.Context, p *paths.Paths, state *repoState, _ stepSelection, _ waitForRunFunc) (wizard.Result, error) {
 		return wizard.Result{Success: true, Pushed: true, TargetBranch: "feat/missing"}, nil
 	}
 	defer func() { runWizardAuto = prevAuto }()
@@ -249,7 +249,7 @@ func TestRootYesPassesCommandContextToWizard(t *testing.T) {
 	cancel()
 
 	prevAuto := runWizardAuto
-	runWizardAuto = func(got context.Context, p *paths.Paths, state *repoState, _ []types.StepName, _ waitForRunFunc) (wizard.Result, error) {
+	runWizardAuto = func(got context.Context, p *paths.Paths, state *repoState, _ stepSelection, _ waitForRunFunc) (wizard.Result, error) {
 		if got == nil {
 			t.Fatal("expected command context")
 		}
@@ -288,7 +288,7 @@ func TestRootYesStopsWaitingForRunWhenContextCanceled(t *testing.T) {
 	defer cancel()
 
 	prevAuto := runWizardAuto
-	runWizardAuto = func(got context.Context, p *paths.Paths, state *repoState, _ []types.StepName, _ waitForRunFunc) (wizard.Result, error) {
+	runWizardAuto = func(got context.Context, p *paths.Paths, state *repoState, _ stepSelection, _ waitForRunFunc) (wizard.Result, error) {
 		cancel()
 		return wizard.Result{Success: true, Pushed: true, TargetBranch: "feat/missing"}, nil
 	}
