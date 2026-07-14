@@ -82,7 +82,12 @@ type PushReceivedParams struct {
 	// The daemon merges it with OnlySteps into the run's persisted selection
 	// (runs.only_steps), which is what makes the PR handoff derive a QA run.
 	WithSteps []types.StepName `json:"with_steps,omitempty"`
-	Intent    string           `json:"intent,omitempty"`
+	// AllowGateConfig is the run's explicit opt-in to letting its agents write
+	// the gate's own config files. Default false is the default-deny: an agent
+	// must not be able to rewrite the rules it is being judged by. It is carried
+	// per run because it is a property of the task, not of the repository.
+	AllowGateConfig bool   `json:"allow_gate_config,omitempty"`
+	Intent          string `json:"intent,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.
@@ -130,7 +135,13 @@ type RerunParams struct {
 	// WithSteps mirrors PushReceivedParams.WithSteps: the on-demand steps to
 	// add to the new run.
 	WithSteps []types.StepName `json:"with_steps,omitempty"`
-	Intent    string           `json:"intent,omitempty"`
+	// AllowGateConfig mirrors PushReceivedParams.AllowGateConfig: the new run's
+	// explicit opt-in to letting its agents write the gate's own config. Like
+	// SkipSteps it is authoritative for the new run and inherits nothing from
+	// the previous one - a rerun is a fresh invocation, so the permission has to
+	// be asked for again.
+	AllowGateConfig bool   `json:"allow_gate_config,omitempty"`
+	Intent          string `json:"intent,omitempty"`
 }
 
 // ResumeParams resumes a previous run for the same branch head. OldRunID is

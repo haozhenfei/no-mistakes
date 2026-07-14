@@ -838,20 +838,25 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 
 	branch := branchFromRef(params.Ref)
 	return m.startRun(ctx, repo, runSpec{
-		branch:    branch,
-		headSHA:   params.New,
-		baseSHA:   params.Old,
-		trigger:   "push",
-		skipSteps: params.SkipSteps,
-		onlySteps: params.OnlySteps,
-		withSteps: params.WithSteps,
-		intent:    params.Intent,
+		branch:          branch,
+		headSHA:         params.New,
+		baseSHA:         params.Old,
+		trigger:         "push",
+		skipSteps:       params.SkipSteps,
+		onlySteps:       params.OnlySteps,
+		withSteps:       params.WithSteps,
+		allowGateConfig: params.AllowGateConfig,
+		intent:          params.Intent,
 	})
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
 // optional intent is stamped onto the new run.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps, onlySteps, withSteps []types.StepName, intent string) (string, error) {
+//
+// allowGateConfig, like the step selection, is authoritative for the new run and
+// inherits nothing from the previous one: a rerun is a fresh invocation, so the
+// permission to touch the gate's own config has to be asked for again.
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps, onlySteps, withSteps []types.StepName, allowGateConfig bool, intent string) (string, error) {
 	repo, err := m.loadRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -895,14 +900,15 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 	}
 
 	return m.startRun(ctx, repo, runSpec{
-		branch:    branch,
-		headSHA:   headSHA,
-		baseSHA:   baseSHA,
-		trigger:   "rerun",
-		skipSteps: skipSteps,
-		onlySteps: onlySteps,
-		withSteps: withSteps,
-		intent:    intent,
+		branch:          branch,
+		headSHA:         headSHA,
+		baseSHA:         baseSHA,
+		trigger:         "rerun",
+		skipSteps:       skipSteps,
+		onlySteps:       onlySteps,
+		withSteps:       withSteps,
+		allowGateConfig: allowGateConfig,
+		intent:          intent,
 	})
 }
 
@@ -919,11 +925,15 @@ type runSpec struct {
 	// transport both reject the combination); withSteps composes with either.
 	// resolveRunSteps turns all three into the two things the run row records: the
 	// skip set and the selection.
-	skipSteps   []types.StepName
-	onlySteps   []types.StepName
-	withSteps   []types.StepName
-	intent      string
-	parentRunID string
+	skipSteps []types.StepName
+	onlySteps []types.StepName
+	withSteps []types.StepName
+	// allowGateConfig is the run's explicit opt-in to letting its agents write
+	// the gate's own config (.no-mistakes.yaml). Default false is the
+	// default-deny; see boundary.Policy and db.Run.AllowGateConfig.
+	allowGateConfig bool
+	intent          string
+	parentRunID     string
 }
 
 // resolveRunSteps turns a caller's step selection into the two facts a run row
@@ -1071,10 +1081,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 	// skipped step is not `completed`, so without the persisted set resume would
 	// re-execute exactly the steps the caller asked to skip.
 	run, err := m.db.InsertRunWithOptions(repo.ID, branch, headSHA, baseSHA, db.RunOptions{
-		Kind:        types.RunKindGate,
-		ParentRunID: spec.parentRunID,
-		SkipSteps:   skipSteps,
-		OnlySteps:   selection,
+		Kind:            types.RunKindGate,
+		ParentRunID:     spec.parentRunID,
+		SkipSteps:       skipSteps,
+		OnlySteps:       selection,
+		AllowGateConfig: spec.allowGateConfig,
 	})
 	if err != nil {
 		trackStartFailure("create_run")

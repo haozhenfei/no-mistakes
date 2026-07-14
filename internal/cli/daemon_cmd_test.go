@@ -109,3 +109,44 @@ func TestParseIntentPushOptionsNone(t *testing.T) {
 		t.Fatalf("parseIntentPushOptions(no intent) = %q, want empty", got)
 	}
 }
+
+func TestParseAllowGateConfigPushOptions(t *testing.T) {
+	cases := []struct {
+		name    string
+		options []string
+		want    bool
+		wantErr bool
+	}{
+		{name: "absent is the default-deny", options: []string{"no-mistakes.skip=review"}},
+		{name: "bare option opts in", options: []string{"no-mistakes.allow-gate-config"}, want: true},
+		{name: "explicit true", options: []string{"no-mistakes.allow-gate-config=true"}, want: true},
+		{name: "explicit false", options: []string{"no-mistakes.allow-gate-config=false"}},
+		{name: "garbage is refused, never read as an opt-in", options: []string{"no-mistakes.allow-gate-config=maybe"}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseAllowGateConfigPushOptions(tc.options)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("want an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("allowGateConfig = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatAllowGateConfigPushOption(t *testing.T) {
+	if got := formatAllowGateConfigPushOption(false); got != "" {
+		t.Fatalf("an ordinary run must carry no opt-in push option, got %q", got)
+	}
+	if got := formatAllowGateConfigPushOption(true); got != "no-mistakes.allow-gate-config" {
+		t.Fatalf("push option = %q", got)
+	}
+}

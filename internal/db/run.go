@@ -53,6 +53,15 @@ type Run struct {
 	// run selected nothing, which is what every ordinary run and every row
 	// written before --only shipped says.
 	OnlySteps []types.StepName
+	// AllowGateConfig is the run's explicit opt-in to letting its agents write
+	// the gate's own config files (.no-mistakes.yaml). It is false on every
+	// ordinary run and on every row written before the change boundary shipped,
+	// which is the default-deny: an agent must not be able to rewrite the rules
+	// it is being judged by. It lives on the run row - not in the repo config -
+	// because it is a property of the task ("this run's purpose IS to change the
+	// gate config"), and because that makes a resume, and a fix round derived
+	// from this run, carry exactly the permission the run was started with.
+	AllowGateConfig bool
 	// QAVerdict is the verdict a QA run reached (PASS / PASS_WITH_ISSUES / FAIL /
 	// PARTIAL), and it is nil on every other kind of run. Together with HeadSHA it
 	// is the durable answer to "what did QA conclude, and about which commit" -
@@ -66,7 +75,7 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, COALESCE(kind, 'gate'), parent_run_id, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), skip_steps, only_steps, qa_verdict, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, COALESCE(kind, 'gate'), parent_run_id, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), skip_steps, only_steps, COALESCE(allow_gate_config, 0), qa_verdict, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -75,7 +84,8 @@ func scanRun(row interface {
 	if err := row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
 		&r.Kind, &r.ParentRunID,
-		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS, &skipSteps, &onlySteps, &r.QAVerdict,
+		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS, &skipSteps, &onlySteps,
+		&r.AllowGateConfig, &r.QAVerdict,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
@@ -138,6 +148,9 @@ type RunOptions struct {
 	// OnlySteps is the run's selection; see Run.OnlySteps for why it is stored
 	// alongside SkipSteps rather than derived from it.
 	OnlySteps []types.StepName
+	// AllowGateConfig records the run's gate-config opt-in; see
+	// Run.AllowGateConfig. Default false is the default-deny.
+	AllowGateConfig bool
 }
 
 // InsertRun creates a new gate run record with no skipped steps.
@@ -163,17 +176,18 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 	}
 	ts := now()
 	r := &Run{
-		ID:        newID(),
-		RepoID:    repoID,
-		Branch:    branch,
-		HeadSHA:   headSHA,
-		BaseSHA:   baseSHA,
-		Status:    types.RunPending,
-		Kind:      kind,
-		SkipSteps: opts.SkipSteps,
-		OnlySteps: opts.OnlySteps,
-		CreatedAt: ts,
-		UpdatedAt: ts,
+		ID:              newID(),
+		RepoID:          repoID,
+		Branch:          branch,
+		HeadSHA:         headSHA,
+		BaseSHA:         baseSHA,
+		Status:          types.RunPending,
+		Kind:            kind,
+		SkipSteps:       opts.SkipSteps,
+		OnlySteps:       opts.OnlySteps,
+		AllowGateConfig: opts.AllowGateConfig,
+		CreatedAt:       ts,
+		UpdatedAt:       ts,
 	}
 	if len(opts.SkipSteps) == 0 {
 		r.SkipSteps = nil
@@ -198,8 +212,8 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 		return nil, err
 	}
 	_, err = d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, kind, parent_run_id, pr_url, skip_steps, only_steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.Kind, r.ParentRunID, r.PRURL, encodedSkip, encodedOnly, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, kind, parent_run_id, pr_url, skip_steps, only_steps, allow_gate_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.Kind, r.ParentRunID, r.PRURL, encodedSkip, encodedOnly, r.AllowGateConfig, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

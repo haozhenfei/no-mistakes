@@ -63,6 +63,12 @@ func (m *RunManager) startWatchRun(ctx context.Context, repo *db.Repo, parent *d
 		// The selection travels with the handoff. It is what tells this run - and
 		// any later recovery of it - that it carries a QA node.
 		OnlySteps: parent.OnlySteps,
+		// So does the gate-config opt-in: a fix round derived from this watcher
+		// runs a fix agent, and it must carry exactly the permission the gate
+		// run was started with - no more (an ordinary run's fix round cannot
+		// touch the gate config) and no less (a run whose whole purpose was to
+		// change the gate config must still be able to fix its own CI failure).
+		AllowGateConfig: parent.AllowGateConfig,
 	})
 	if err != nil {
 		return "", fmt.Errorf("create watch run: %w", err)
@@ -313,12 +319,17 @@ func (m *RunManager) deriveFixRun(repo *db.Repo, watchRun *db.Run, findingsJSON,
 	}
 
 	runID, err := m.startRun(ctx, repo, runSpec{
-		branch:      watchRun.Branch,
-		headSHA:     headSHA,
-		baseSHA:     watchRun.BaseSHA,
-		trigger:     "watch_fix",
-		intent:      fixRunIntent(reason, derefString(watchRun.PRURL)),
-		parentRunID: watchRun.ID,
+		branch:  watchRun.Branch,
+		headSHA: headSHA,
+		baseSHA: watchRun.BaseSHA,
+		trigger: "watch_fix",
+		intent:  fixRunIntent(reason, derefString(watchRun.PRURL)),
+		// The fix round inherits the watcher's gate-config permission, which the
+		// watcher inherited from the gate run that opened the PR. A fix round is
+		// not a fresh invocation the caller can re-authorize - nobody is at the
+		// keyboard - so it carries the permission the run was started with.
+		allowGateConfig: watchRun.AllowGateConfig,
+		parentRunID:     watchRun.ID,
 	})
 	if err != nil {
 		slog.Error("failed to derive fix run from watch run", "watch_run_id", watchRun.ID, "error", err)

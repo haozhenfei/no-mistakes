@@ -67,9 +67,18 @@ func hasBlockingFindings(items []Finding) bool {
 // The before-image is sctx.Run.HeadSHA: every step that moves the worktree HEAD
 // (rebase, this function, push) keeps it in sync, so at entry it is the HEAD the
 // agent started from.
+//
+// It is also the single choke point every agent-written change in the pipeline
+// passes through, which is why the run's change boundary is enforced here,
+// before any of that work is adopted: nothing else reaches the branch ref, the
+// push step, or the PR. See enforceChangeBoundary.
 func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string) error {
 	ctx := sctx.Ctx
 	previousHead := sctx.Run.HeadSHA
+
+	if err := enforceChangeBoundary(sctx, stepName, previousHead); err != nil {
+		return err
+	}
 
 	commitMessage := ""
 	status, _ := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")

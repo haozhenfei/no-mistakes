@@ -470,3 +470,62 @@ func TestParkedWatchRunFixResponseDerivesGateRun(t *testing.T) {
 		t.Fatal("the derived gate run never ran")
 	}
 }
+
+// The gate-config opt-in travels the same handoff the QA selection does: gate
+// run -> watch run -> derived fix round. A fix round is not a fresh invocation
+// anybody can re-authorize (nobody is at the keyboard), so it has to carry the
+// permission the run was started with - and an ordinary run's fix round has to
+// carry the default-deny.
+func TestWatchRunFixRoundInheritsTheGateConfigOptIn(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		name := "default_deny"
+		if allow {
+			name = "opted_in"
+		}
+		t.Run(name, func(t *testing.T) {
+			mgr, p, d := newTestManager(t)
+			repo, headSHA := setupTestGitRepo(t, p, d, "repo-boundary-"+name)
+
+			findings := `{"findings":[{"severity":"error","description":"CI check failing: build","action":"auto-fix"}],"summary":"CI failing"}`
+			mgr.SetWatchStepFactory(func(_ []types.StepName) []pipeline.Step {
+				return []pipeline.Step{&mockWatchStep{action: pipeline.WatchFix, findings: findings}}
+			})
+			fixRan := make(chan *db.Run, 1)
+			mgr.steps = func() []pipeline.Step {
+				return []pipeline.Step{&recordingStep{name: types.StepFix, seen: fixRan}}
+			}
+
+			gate, err := d.InsertRunWithOptions(repo.ID, "main", headSHA, headSHA, db.RunOptions{AllowGateConfig: allow})
+			if err != nil {
+				t.Fatalf("insert gate run: %v", err)
+			}
+			if err := d.UpdateRunPRURL(gate.ID, testPRURL); err != nil {
+				t.Fatalf("set pr url: %v", err)
+			}
+			gate, _ = d.GetRun(gate.ID)
+
+			watchID, err := mgr.startWatchRun(context.Background(), repo, gate)
+			if err != nil {
+				t.Fatalf("start watch run: %v", err)
+			}
+			watchRun, err := d.GetRun(watchID)
+			if err != nil {
+				t.Fatalf("get watch run: %v", err)
+			}
+			if watchRun.AllowGateConfig != allow {
+				t.Fatalf("watch run AllowGateConfig = %v, want %v", watchRun.AllowGateConfig, allow)
+			}
+			waitForRunStatus(t, d, watchID, types.RunCompleted)
+
+			fixRun := waitForRunOfKind(t, d, repo.ID, types.RunKindGate, gate.ID)
+			if fixRun.AllowGateConfig != allow {
+				t.Fatalf("derived fix run AllowGateConfig = %v, want %v", fixRun.AllowGateConfig, allow)
+			}
+			select {
+			case <-fixRan:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the derived gate run never executed")
+			}
+		})
+	}
+}

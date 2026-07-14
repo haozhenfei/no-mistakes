@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS runs (
     parked_ms            INTEGER,
     skip_steps           TEXT,
     only_steps           TEXT,
+    allow_gate_config    INTEGER NOT NULL DEFAULT 0,
     qa_verdict           TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
@@ -181,6 +182,11 @@ var migrationStatements = []string{
 	// only_steps says "this run selected nothing", which is the truth for every
 	// legacy row and every ordinary run.
 	`ALTER TABLE runs ADD COLUMN only_steps TEXT`,
+	// allow_gate_config is the run's explicit opt-in to letting its agents write
+	// the gate's own config (.no-mistakes.yaml). The DEFAULT 0 backfills every
+	// existing row with the default-deny, which is the answer we want for them:
+	// no run that predates the change boundary ever asked for the permission.
+	`ALTER TABLE runs ADD COLUMN allow_gate_config INTEGER NOT NULL DEFAULT 0`,
 	// qa_verdict is the QA run's four-value verdict (PASS / PASS_WITH_ISSUES /
 	// FAIL / PARTIAL). It lives on the run row rather than only inside the step's
 	// findings blob because the watch run has to read it later, from a different

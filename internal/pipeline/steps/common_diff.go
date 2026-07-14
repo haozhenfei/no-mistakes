@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/boundary"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
@@ -77,21 +78,11 @@ func detectNewTestFiles(ctx context.Context, dir string) []string {
 //   - No slash: match against filename only (e.g., "*.generated.go" matches "pkg/foo.generated.go")
 //   - Ends with "/**": match any file under that directory (e.g., "vendor/**" matches "vendor/pkg/foo.go")
 //   - Otherwise: filepath.Match against the full path
+//
+// boundary.MatchPath owns the rules, so ignore_patterns and the change
+// boundary's path patterns cannot drift into meaning different things.
 func matchIgnorePattern(path, pattern string) bool {
-	// "vendor/**" → matches anything under "vendor/"
-	if strings.HasSuffix(pattern, "/**") {
-		prefix := strings.TrimSuffix(pattern, "/**")
-		return path == prefix || strings.HasPrefix(path, prefix+"/")
-	}
-	// No slash in pattern → match against basename only
-	if !strings.Contains(pattern, "/") {
-		base := filepath.Base(path)
-		matched, _ := filepath.Match(pattern, base)
-		return matched
-	}
-	// Full path match
-	matched, _ := filepath.Match(pattern, path)
-	return matched
+	return boundary.MatchPath(path, pattern)
 }
 
 // filterDiff removes diff sections for files matching any of the ignore patterns.
