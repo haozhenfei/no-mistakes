@@ -420,13 +420,49 @@ func (h *Harness) CommitChange(branch, path, content, message string) string {
 // which fires the post-receive hook and triggers a daemon-side pipeline
 // run. Returns the IPC client connected to the daemon's socket.
 func (h *Harness) PushToGate(branch string) {
+	h.PushToGateWithOptions(branch)
+}
+
+// PushToGateWithOptions is PushToGate carrying git push options
+// (`-o no-mistakes.<option>`), which is how a run's selection and its
+// gate-config opt-in reach the daemon.
+func (h *Harness) PushToGateWithOptions(branch string, options ...string) {
 	h.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := h.runGit(ctx, h.WorkDir, "push", "no-mistakes", branch)
+	args := []string{"push"}
+	for _, opt := range options {
+		args = append(args, "-o", opt)
+	}
+	args = append(args, "no-mistakes", branch)
+	out, err := h.runGit(ctx, h.WorkDir, args...)
 	if err != nil {
 		h.t.Fatalf("git push no-mistakes %s: %v\n%s", branch, err, out)
 	}
+}
+
+// UpstreamBranchExists reports whether the branch reached the upstream remote.
+// Unlike UpstreamBranchSHA it does not fail the test when the branch is absent -
+// absence is the assertion for a run that was stopped before its push step.
+func (h *Harness) UpstreamBranchExists(branch string) bool {
+	h.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := h.runGit(ctx, h.UpstreamDir, "rev-parse", "--verify", "refs/heads/"+branch)
+	return err == nil
+}
+
+// UpstreamFileAtBranch returns a file's contents as they exist on the upstream
+// remote's branch - what the rest of the team would see after the gate pushed.
+func (h *Harness) UpstreamFileAtBranch(branch, path string) string {
+	h.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/"+branch+":"+path)
+	if err != nil {
+		h.t.Fatalf("git show %s:%s on upstream: %v\n%s", branch, path, err, out)
+	}
+	return string(out)
 }
 
 func (h *Harness) UpstreamBranchSHA(branch string) string {

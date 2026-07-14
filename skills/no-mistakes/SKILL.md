@@ -34,6 +34,13 @@ If a later fix round changes product source, the pull request gets a comment
 saying the verdict is older than the code; QA is not re-run automatically, since
 that is a call for the user to make.
 
+The pipeline's own agents may not write the gate's config
+(`.no-mistakes.yaml`): a run whose agent does fails with the offending path
+named, because an agent must not rewrite the rules it is judged by. If - and only
+if - changing the gate config is what the user asked for, start the run with
+`--allow-gate-config`. Do not add that flag to make a boundary failure go
+away; a failure means an agent went somewhere the task never asked it to go.
+
 ## Two ways to invoke
 
 `/no-mistakes` works in two modes, depending on whether the user hands you a

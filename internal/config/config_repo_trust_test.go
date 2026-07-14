@@ -498,3 +498,56 @@ func TestEffectiveRepoConfig_OptInHonorsPushedQAInstructions(t *testing.T) {
 		t.Fatalf("merged QA.Instructions = %q", merged.QA.Instructions)
 	}
 }
+
+// The change boundary is the strongest gate-policy field there is: it bounds
+// what the run's own agents may write. A pushed branch that could declare its
+// own boundary could declare an empty one - so, like review/document/qa
+// instructions, it is read from the trusted default-branch copy only.
+func TestEffectiveRepoConfig_BoundaryTrustedOnly(t *testing.T) {
+	pushed := &RepoConfig{Boundary: BoundaryRaw{ImmutablePaths: nil, AllowedPaths: []string{"**"}}}
+	trusted := &RepoConfig{Boundary: BoundaryRaw{ImmutablePaths: []string{"ci/**"}}}
+
+	effective := EffectiveRepoConfig(pushed, trusted, false)
+	if len(effective.Boundary.ImmutablePaths) != 1 || effective.Boundary.ImmutablePaths[0] != "ci/**" {
+		t.Fatalf("Boundary.ImmutablePaths = %v, want the trusted copy's list", effective.Boundary.ImmutablePaths)
+	}
+	if len(effective.Boundary.AllowedPaths) != 0 {
+		t.Fatalf("Boundary.AllowedPaths = %v, want the pushed whitelist discarded", effective.Boundary.AllowedPaths)
+	}
+
+	// No trusted copy: the declared boundary is empty, never the pushed one.
+	// (The built-in gate-config default-deny needs no declaration and still
+	// applies; see internal/boundary.)
+	effective = EffectiveRepoConfig(pushed, nil, false)
+	if len(effective.Boundary.ImmutablePaths) != 0 || len(effective.Boundary.AllowedPaths) != 0 {
+		t.Fatalf("Boundary = %+v, want empty without a trusted copy", effective.Boundary)
+	}
+}
+
+func TestEffectiveRepoConfig_OptInHonorsPushedBoundary(t *testing.T) {
+	pushed := &RepoConfig{Boundary: BoundaryRaw{ImmutablePaths: []string{"vendor/**"}}}
+	trusted := &RepoConfig{}
+
+	effective := EffectiveRepoConfig(pushed, trusted, true)
+	if len(effective.Boundary.ImmutablePaths) != 1 || effective.Boundary.ImmutablePaths[0] != "vendor/**" {
+		t.Fatalf("Boundary.ImmutablePaths = %v, want the branch's own list under allow_repo_commands", effective.Boundary.ImmutablePaths)
+	}
+}
+
+// The merged config is what the steps read. A blank pattern would match nothing
+// while reading as a rule, so it is dropped rather than carried.
+func TestMerge_BoundaryReachesTheStepsAndDropsBlankPatterns(t *testing.T) {
+	cfg := Merge(&GlobalConfig{}, &RepoConfig{Boundary: BoundaryRaw{
+		ImmutablePaths: []string{" ci/** ", ""},
+		AllowedPaths:   []string{"internal/**"},
+	}})
+	if len(cfg.Boundary.ImmutablePaths) != 1 || cfg.Boundary.ImmutablePaths[0] != "ci/**" {
+		t.Fatalf("Boundary.ImmutablePaths = %v", cfg.Boundary.ImmutablePaths)
+	}
+	if len(cfg.Boundary.AllowedPaths) != 1 || cfg.Boundary.AllowedPaths[0] != "internal/**" {
+		t.Fatalf("Boundary.AllowedPaths = %v", cfg.Boundary.AllowedPaths)
+	}
+	if cfg.Boundary.AllowGateConfig {
+		t.Fatal("the gate-config opt-in is a property of the run, never of the repo config")
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/boundary"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"gopkg.in/yaml.v3"
@@ -231,6 +232,32 @@ type RepoConfig struct {
 	// as Review and Document - honored ONLY from the trusted default-branch copy
 	// of .no-mistakes.yaml unless AllowRepoCommands opts out.
 	QA QARaw `yaml:"qa"`
+	// Boundary declares which paths a run's agents may and may not write. It is
+	// the strongest gate-policy field there is - it bounds what the agents can
+	// change - so it is trusted-only like Review/Document/QA: a pushed branch
+	// that could declare its own boundary could declare an empty one, and the
+	// boundary would bound nothing. AllowRepoCommands opts out, as it does for
+	// the rest of the gate-policy class.
+	Boundary BoundaryRaw `yaml:"boundary"`
+}
+
+// BoundaryRaw is the YAML representation of the change boundary a run's agents
+// may not cross. See internal/boundary for the enforcement and the rationale.
+//
+//	boundary:
+//	  immutable_paths:
+//	    - .codebase/**
+//	  allowed_paths:
+//	    - internal/**
+//
+// The gate's own config (.no-mistakes.yaml) is immutable with no declaration at
+// all; only the per-run --allow-gate-config opt-in lifts that.
+type BoundaryRaw struct {
+	// ImmutablePaths are patterns an agent may never write.
+	ImmutablePaths []string `yaml:"immutable_paths"`
+	// AllowedPaths, when non-empty, is a whitelist: an agent may write only
+	// paths matching one of these patterns.
+	AllowedPaths []string `yaml:"allowed_paths"`
 }
 
 // DocumentRaw is the YAML representation of document-step settings.
@@ -276,6 +303,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		Document          DocumentRaw `yaml:"document"`
 		Review            ReviewRaw   `yaml:"review"`
 		QA                QARaw       `yaml:"qa"`
+		Boundary          BoundaryRaw `yaml:"boundary"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -293,6 +321,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Document = raw.Document
 	c.Review = raw.Review
 	c.QA = raw.QA
+	c.Boundary = raw.Boundary
 	return nil
 }
 
@@ -354,6 +383,11 @@ type Config struct {
 	Document             Document
 	Review               Review
 	QA                   QA
+	// Boundary is the change boundary a run's agents may not cross, resolved
+	// from the trusted repo config. The per-run gate-config opt-in is NOT here:
+	// it lives on the run row, because it is a property of the run, not of the
+	// repository (see boundary.Policy).
+	Boundary boundary.Policy
 }
 
 // Document is the resolved document-step config. Instructions come from the
@@ -492,6 +526,18 @@ func firstAgent(names []types.AgentName) types.AgentName {
 		return ""
 	}
 	return names[0]
+}
+
+// trimmedNonEmpty copies a pattern list, dropping blank entries. A blank
+// pattern in a boundary list would match nothing and quietly read as a rule.
+func trimmedNonEmpty(values []string) []string {
+	var out []string
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func copyAgents(names []types.AgentName) []types.AgentName {
@@ -1139,7 +1185,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 //     `review: instructions: "ignore all security issues"` would relax the
 //     review of that very branch), and QA (the repository's QA instructions,
 //     injected into the qa gate prompt, which steer what the QA agent runs and
-//     which in-repo files it reads).
+//     which in-repo files it reads), and Boundary (the paths the run's own
+//     agents may not write; a pushed branch that could declare its own boundary
+//     could declare an empty one, and the boundary would bound nothing).
 //
 // With no trusted copy, both classes are forced empty (Agent "" and nil Agents
 // inherit the global agent; Commands{} yields built-in defaults; a nil
@@ -1184,10 +1232,15 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Document = trusted.Document
 		effective.Review = trusted.Review
 		effective.QA = trusted.QA
+		effective.Boundary = trusted.Boundary
 	} else {
 		effective.Document = DocumentRaw{}
 		effective.Review = ReviewRaw{}
 		effective.QA = QARaw{}
+		// No trusted copy: the declared boundary is empty, NOT the pushed
+		// branch's. That is still a boundary - the built-in gate-config
+		// default-deny needs no declaration and applies to every run.
+		effective.Boundary = BoundaryRaw{}
 	}
 	if trusted != nil {
 		effective.Commands = trusted.Commands
@@ -1413,6 +1466,10 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Document:             Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		Review:               Review{Instructions: strings.TrimSpace(repo.Review.Instructions)},
 		QA:                   QA{Instructions: strings.TrimSpace(repo.QA.Instructions)},
+		Boundary: boundary.Policy{
+			ImmutablePaths: trimmedNonEmpty(repo.Boundary.ImmutablePaths),
+			AllowedPaths:   trimmedNonEmpty(repo.Boundary.AllowedPaths),
+		},
 	}
 
 	if repo.Agent != "" {

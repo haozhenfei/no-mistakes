@@ -70,6 +70,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			allowGateConfig, err := parseAllowGateConfigPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			intent, err := parseIntentPushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -92,14 +96,15 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 
 			var result ipc.PushReceivedResult
 			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
-				Gate:      gatePath,
-				Ref:       ref,
-				Old:       oldSHA,
-				New:       newSHA,
-				SkipSteps: skipSteps,
-				OnlySteps: onlySteps,
-				WithSteps: withSteps,
-				Intent:    intent,
+				Gate:            gatePath,
+				Ref:             ref,
+				Old:             oldSHA,
+				New:             newSHA,
+				SkipSteps:       skipSteps,
+				OnlySteps:       onlySteps,
+				WithSteps:       withSteps,
+				AllowGateConfig: allowGateConfig,
+				Intent:          intent,
 			}, &result)
 		},
 	}
@@ -157,6 +162,51 @@ func parseSkipSteps(value string) ([]types.StepName, error) {
 		steps = append(steps, step)
 	}
 	return dedupeSteps(steps), nil
+}
+
+// allowGateConfigPushOption carries the run's gate-config opt-in through the
+// git push that starts it. It is a bare flag: presence means "this run's agents
+// may write the gate's own config". Absence - the case for every ordinary push -
+// is the default-deny.
+//
+// Being a push option (rather than a repo-config key) is the point: the
+// permission is visible on the run that used it, and a pushed branch cannot
+// grant it to itself by editing a file. Whoever starts the run has to say so.
+const allowGateConfigPushOption = "no-mistakes.allow-gate-config"
+
+// parseAllowGateConfigPushOptions reports whether the push carried the opt-in.
+// Both the bare form and an explicit `=true`/`=1` are accepted; an explicit
+// false-y value is refused rather than silently read as an opt-in.
+func parseAllowGateConfigPushOptions(options []string) (bool, error) {
+	allow := false
+	for _, option := range options {
+		if option == allowGateConfigPushOption {
+			allow = true
+			continue
+		}
+		value, ok := strings.CutPrefix(option, allowGateConfigPushOption+"=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "true", "yes":
+			allow = true
+		case "0", "false", "no":
+			allow = false
+		default:
+			return false, fmt.Errorf("push option %s: unknown value %q (use the bare option, or =true/=false)", allowGateConfigPushOption, value)
+		}
+	}
+	return allow, nil
+}
+
+// formatAllowGateConfigPushOption renders the opt-in for the git push that
+// starts a run, or "" when the run did not ask for it.
+func formatAllowGateConfigPushOption(allow bool) string {
+	if !allow {
+		return ""
+	}
+	return allowGateConfigPushOption
 }
 
 // intentPushOptionPrefix carries an agent-supplied intent through a git push.

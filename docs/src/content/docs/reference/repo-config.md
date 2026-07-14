@@ -227,6 +227,45 @@ It needs the pull request to already exist (it reads the PR and comments on it),
 
 **Trusted by default.** Like `commands.*`, `agent`, `review.instructions`, and `document.instructions`, this field steers what runs on the daemon host, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml` — unless you have set [`allow_repo_commands: true`](#allow_repo_commands) for this repo, which opts the whole repo config over to the branch being gated.
 
+### boundary
+
+The change boundary a run's **agents** may not cross: the paths they must not write, and optionally the only paths they may write.
+
+| | |
+|---|---|
+| Type | `boundary.immutable_paths: string[]`, `boundary.allowed_paths: string[]` |
+| Default | Empty — plus a built-in rule: the gate's own config is immutable (see below) |
+
+Every agent in the pipeline can write to the worktree, and no-mistakes commits what it wrote. This bounds that.
+
+```yaml
+boundary:
+  immutable_paths:
+    - .codebase/**       # the team's CI definition
+    - vendor/**
+  allowed_paths:
+    - src/**             # when set, agents may write nothing else
+    - docs/**
+```
+
+Patterns use the same rules as [`ignore_patterns`](#ignore_patterns): `vendor/**` matches everything under `vendor/`, a pattern with no slash matches that filename at any depth, and anything else is matched against the full repo-relative path.
+
+**The gate's own config is immutable by default.** `.no-mistakes.yaml` (and `.no-mistakes.yml`) is refused to agents with no declaration at all — an agent must not be able to rewrite the rules it is being judged by. When an agent writes it, the run **fails** with the path named; the agent's work is left in the worktree, never silently dropped.
+
+A task whose whole purpose *is* to change the gate config passes the explicit opt-in, per run:
+
+```bash
+no-mistakes axi run --allow-gate-config --intent "retune the gate's test command"
+# or, pushing directly:
+git push -o no-mistakes.allow-gate-config no-mistakes <branch>
+```
+
+The opt-in lives on the run, not in this file: it is a property of the task, and a run that carries it is visible as such. It waives only the built-in gate-config rule — `immutable_paths` you declared here is your own list, and no run can talk its way out of it.
+
+**The boundary constrains agents, not people.** Your own commit changing `.no-mistakes.yaml` is the ordinary way to change it and needs no opt-in; the gate reviews it like any other change. The opt-in is only needed when an *agent* in the run has to write that file.
+
+**Trusted by default.** Like `commands.*`, `agent`, and the `*.instructions` fields, this field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml` — a pushed branch that could declare its own boundary could declare an empty one — unless you have set [`allow_repo_commands: true`](#allow_repo_commands) for this repo.
+
 ### Command process lifetime
 
 All configured `commands.*` entries are scoped to their step.

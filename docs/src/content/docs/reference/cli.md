@@ -38,7 +38,7 @@ Creates or refreshes a local bare repo, installs the post-receive hook, best-eff
 `init` writes no skill files into the repo; the user-level copies cover every supported agent (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex, OpenCode, Rovo Dev, and Pi) across all repos.
 If the home `.claude` links to `.agents`, `.claude/skills` links to `.agents/skills`, or the reverse, `init` follows that layout and still makes the skill readable from both logical paths.
 If the repo still contains a vendored skill copy written by an older no-mistakes version, `init` leaves it untouched and prints a notice that it is no longer needed and can be removed.
-The gate advertises Git push-option support, so you can skip steps for one push with `git push -o no-mistakes.skip=test,lint no-mistakes <branch>`.
+The gate advertises Git push-option support, so you can skip steps for one push with `git push -o no-mistakes.skip=test,lint no-mistakes <branch>`, or let that run's agents change the gate config with `git push -o no-mistakes.allow-gate-config no-mistakes <branch>`.
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and pass `--fork-url` with your fork remote URL.
 The push, rebase branch-sync, and CI auto-fix pushes use the fork, while GitHub PR and CI commands stay scoped to the parent repository and create PRs with `--head <fork-owner>:<branch>`.
@@ -94,6 +94,7 @@ no-mistakes axi run --only qa
 | `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
 | `--only`      | `string` | (none)  | Comma-separated pipeline steps to run exclusively; skips every other step |
 | `--with`      | `string` | (none)  | Comma-separated on-demand steps to add to a normal run (`qa`)    |
+| `--allow-gate-config` | `bool` | `false` | Let this run's agents change the gate's own config (`.no-mistakes.yaml`) |
 
 `--only` is the complement of `--skip`, and the two cannot be combined.
 `--only review` re-runs the review step alone; `--only qa` runs the [QA step](/no-mistakes/reference/pipeline-steps/#qa) against the branch's existing pull request without running the rest of the pipeline.
@@ -101,6 +102,11 @@ no-mistakes axi run --only qa
 `--with` is additive and composes with either: `--with qa` runs the whole pipeline and then, once the pull request exists, starts the QA pass alongside the CI monitoring instead of delaying it. QA never runs unless it is named.
 A run that names neither `push` nor `pr` cannot change the pull request, so it leaves any watch run on that branch monitoring it undisturbed.
 The step set belongs to the run, so `no-mistakes axi resume` continues with the same steps and takes no step flags of its own.
+
+`--allow-gate-config` lifts the [change boundary](/no-mistakes/reference/repo-config/#boundary)'s default rule that agents may not write the gate's own config.
+Without it, an agent that writes `.no-mistakes.yaml` fails the run with the path named — an agent must not rewrite the rules it is being judged by.
+Pass it only when changing the gate config is the point of the task.
+Like the step set, the permission belongs to the run: a resume, and a fix round derived from the run, carry exactly what the run was started with.
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.

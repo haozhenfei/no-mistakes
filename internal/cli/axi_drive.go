@@ -62,6 +62,7 @@ func newAxiRunCmd() *cobra.Command {
 	var skipValue string
 	var onlyValue string
 	var withValue string
+	var allowGateConfig bool
 	var intent string
 
 	cmd := &cobra.Command{
@@ -82,6 +83,10 @@ func newAxiRunCmd() *cobra.Command {
 			"full pipeline and then, once the PR exists, starts a product-level QA pass that\n" +
 			"runs alongside the CI watcher instead of delaying it. QA is never run unless\n" +
 			"named.\n\n" +
+			"--allow-gate-config lets this run's agents change the gate's own config\n" +
+			"(.no-mistakes.yaml). Without it, an agent that writes that file fails the run\n" +
+			"with the path named: an agent must not rewrite the rules it is judged by.\n" +
+			"Pass it only when changing the gate config IS the task.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary or a configured\n" +
 			"ACP target through acpx, and fails before the first step when none can run.\n\n" +
@@ -96,12 +101,15 @@ func newAxiRunCmd() *cobra.Command {
 				"has_skip":   strings.TrimSpace(skipValue) != "",
 				"has_only":   strings.TrimSpace(onlyValue) != "",
 				"has_with":   strings.TrimSpace(withValue) != "",
+				// The gate-config opt-in is rare and consequential; count how
+				// often it is actually asked for.
+				"allow_gate_config": allowGateConfig,
 			}, func() error {
 				selection, err := parseStepSelectionWith(skipValue, onlyValue, withValue)
 				if err != nil {
 					return emitError(cmd, 2, err.Error(), stepSelectionHelp())
 				}
-				return runAxiRun(cmd, autoYes, selection, intent)
+				return runAxiRun(cmd, autoYes, selection, allowGateConfig, intent)
 			})
 		},
 	}
@@ -109,6 +117,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&onlyValue, "only", "", "comma-separated pipeline steps to run exclusively (skips every other step; not combinable with --skip)")
 	cmd.Flags().StringVar(&withValue, "with", "", "comma-separated on-demand steps to add to a normal run (qa); QA runs after the PR exists, in parallel with the CI watcher")
+	cmd.Flags().BoolVar(&allowGateConfig, "allow-gate-config", false, "let this run's agents change the gate's own config (.no-mistakes.yaml); off by default, so an agent cannot rewrite the rules it is judged by")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	return cmd
 }
@@ -182,7 +191,7 @@ func runAxiResume(cmd *cobra.Command, runID string, autoYes bool) error {
 	return renderDriveResult(cmd, final, ciReady)
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, selection stepSelection, intent string) error {
+func runAxiRun(cmd *cobra.Command, autoYes bool, selection stepSelection, allowGateConfig bool, intent string) error {
 	ctx := cmd.Context()
 	env, err := openAxiRunEnv()
 	if err != nil {
@@ -225,7 +234,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, selection stepSelection, intent
 			return guard(cmd)
 		}
 		var err error
-		runID, err = triggerRun(ctx, env, branch, headSHA, selection, intent)
+		runID, err = triggerRun(ctx, env, branch, headSHA, selection, allowGateConfig, intent)
 		if err != nil {
 			return emitError(cmd, 1, err.Error(), gatePushHelp(err)...)
 		}
@@ -302,8 +311,11 @@ func preflightGuard(ctx context.Context, env *axiEnv, branch string) func(*cobra
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, selection stepSelection, intent string) (string, error) {
+func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, selection stepSelection, allowGateConfig bool, intent string) (string, error) {
 	pushOptions := selection.pushOptions()
+	if opt := formatAllowGateConfigPushOption(allowGateConfig); opt != "" {
+		pushOptions = append(pushOptions, opt)
+	}
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
@@ -325,7 +337,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, select
 	// No run appeared: the push was likely up-to-date. Rerun the latest gate
 	// head so `axi run` is still useful when there are no new commits.
 	var rr ipc.RerunResult
-	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, selection, intent), &rr); err != nil {
+	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, selection, allowGateConfig, intent), &rr); err != nil {
 		return "", fmt.Errorf("no run started for %q: %v", branch, err)
 	}
 	return rr.RunID, nil
@@ -418,14 +430,15 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 	return &ipc.GetActiveRunParams{RepoID: repoID, Branch: branch}
 }
 
-func rerunParams(repoID, branch string, selection stepSelection, intent string) *ipc.RerunParams {
+func rerunParams(repoID, branch string, selection stepSelection, allowGateConfig bool, intent string) *ipc.RerunParams {
 	return &ipc.RerunParams{
-		RepoID:    repoID,
-		Branch:    branch,
-		SkipSteps: selection.skip,
-		OnlySteps: selection.only,
-		WithSteps: selection.with,
-		Intent:    intent,
+		RepoID:          repoID,
+		Branch:          branch,
+		SkipSteps:       selection.skip,
+		OnlySteps:       selection.only,
+		WithSteps:       selection.with,
+		AllowGateConfig: allowGateConfig,
+		Intent:          intent,
 	}
 }
 

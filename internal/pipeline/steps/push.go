@@ -32,6 +32,19 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 	}
 
+	// This step is the pipeline's second adoption point: it sweeps up whatever an
+	// agent left uncommitted (a step that ran an agent outside a fix path leaves
+	// no commit of its own) and pushes it. So the run's change boundary is
+	// enforced here too, or an agent could reach the remote by simply not
+	// committing - the one route commitAgentFixes does not cover.
+	//
+	// Before the evidence sweep below, deliberately: in-repo evidence is written
+	// by the tool, not by an agent, and judging it against the boundary would
+	// refuse a run whose allowed_paths (correctly) never mention it.
+	if err := enforceChangeBoundary(sctx, s.Name(), sctx.Run.HeadSHA); err != nil {
+		return nil, err
+	}
+
 	// Commit any uncommitted changes from agent fixes
 	if err := s.stageInRepoEvidence(sctx); err != nil {
 		return nil, err
