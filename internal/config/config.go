@@ -38,6 +38,18 @@ const (
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
+	// DefaultRunSetupTimeout bounds the daemon's pre-pipeline setup for a run:
+	// creating the worktree, copying the git identity, fetching the trusted
+	// default branch, and resolving the agent. Every one of those forks a
+	// subprocess that can block forever - a git child that the OS never lets
+	// return (a daemon confined to a sandbox that excludes the repo it was
+	// asked to gate), or a fetch against an unreachable remote. Without a
+	// deadline the run sits `pending` with zero steps and zero logs while the
+	// client polls it, which is the worst failure this tool can produce: it
+	// looks like work. The value is generous because a cold `git worktree add`
+	// on a large monorepo is legitimately slow; it is a backstop against never,
+	// not a performance budget.
+	DefaultRunSetupTimeout = 10 * time.Minute
 	// CITimeoutUnlimited is the sentinel meaning "monitor until the PR is
 	// merged, closed, or the run is aborted - never self-terminate".
 	// Any non-positive ci_timeout, or the keywords "unlimited", "none",
@@ -56,6 +68,7 @@ type GlobalConfig struct {
 	CITimeout            time.Duration       `yaml:"-"`
 	StepQuietWarning     time.Duration       `yaml:"-"`
 	DaemonConnectTimeout time.Duration       `yaml:"-"`
+	RunSetupTimeout      time.Duration       `yaml:"-"`
 	LogLevel             string              `yaml:"log_level"`
 	// SessionReuse controls per-run, per-role agent session reuse in the
 	// review loop (one durable reviewer session across full reviews, a
@@ -216,6 +229,7 @@ type globalConfigRaw struct {
 	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
 	CITimeout            string              `yaml:"ci_timeout"`
 	DaemonConnectTimeout string              `yaml:"daemon_connect_timeout"`
+	RunSetupTimeout      string              `yaml:"run_setup_timeout"`
 	BabysitTimeout       string              `yaml:"babysit_timeout"`
 	StepQuietWarning     string              `yaml:"step_quiet_warning"`
 	LogLevel             string              `yaml:"log_level"`
@@ -618,6 +632,13 @@ step_quiet_warning: "10m"
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
 daemon_connect_timeout: "3s"
+
+# Maximum time the daemon spends preparing a run before the pipeline starts:
+# creating the worktree, copying the git identity from your clone, fetching the
+# trusted default branch, and resolving the agent. Exceeding it fails the run
+# with a reason instead of leaving it stuck in pending forever. Raise it if a
+# cold worktree checkout of your monorepo legitimately takes longer.
+run_setup_timeout: "10m"
 
 # Reuse one durable agent session per run for the review loop: the reviewer
 # keeps a single session across the initial review and every full rereview,
@@ -1068,6 +1089,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		CITimeout:            DefaultCITimeout,
 		StepQuietWarning:     DefaultStepQuietWarning,
 		DaemonConnectTimeout: DefaultDaemonConnectTimeout,
+		RunSetupTimeout:      DefaultRunSetupTimeout,
 		LogLevel:             "info",
 		SessionReuse:         true,
 		Notify:               Notify{ReminderInterval: DefaultReminderInterval},
@@ -1138,6 +1160,13 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.DaemonConnectTimeout = d
+	}
+	if raw.RunSetupTimeout != "" {
+		d, err := parsePositiveDuration("run_setup_timeout", raw.RunSetupTimeout)
+		if err != nil {
+			return nil, err
+		}
+		cfg.RunSetupTimeout = d
 	}
 	if raw.LogLevel != "" {
 		cfg.LogLevel = raw.LogLevel
