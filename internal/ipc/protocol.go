@@ -266,6 +266,14 @@ type RunInfo struct {
 	Steps              []StepResultInfo `json:"steps,omitempty"`
 	CreatedAt          int64            `json:"created_at"`
 	UpdatedAt          int64            `json:"updated_at"`
+	// Kind, SkipSteps and OnlySteps are the run's shape: gate or watch, what it
+	// does not execute (runs.skip_steps), and the steps its caller named
+	// (runs.only_steps). A client that carries a step selection needs them to
+	// tell whether an already-active run honours that selection, instead of
+	// re-attaching to a run that would never execute the requested step.
+	Kind      types.RunKind    `json:"kind,omitempty"`
+	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
+	OnlySteps []types.StepName `json:"only_steps,omitempty"`
 }
 
 // StepResultInfo is the IPC representation of a step result.

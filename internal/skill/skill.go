@@ -68,6 +68,11 @@ expensive - so naming it is the only way it runs. Only do this when the user ask
 for QA. ` + "`--only=qa`" + ` QAs the branch's existing pull request without running the
 rest of the pipeline.
 
+Either way the QA pass itself runs in the watch run that monitors the pull
+request, not in the run you started, so that run finishing is NOT a QA verdict.
+QA takes ~25 minutes and posts its report to the pull request unless it passes
+cleanly; follow it with ` + "`no-mistakes axi status`" + `.
+
 A QA verdict is about the exact commit it exercised, and the report says which.
 If a later fix round changes product source, the pull request gets a comment
 saying the verdict is older than the code; QA is not re-run automatically, since

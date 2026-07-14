@@ -590,6 +590,9 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		AwaitingAgentSince: r.AwaitingAgentSince,
 		CreatedAt:          r.CreatedAt,
 		UpdatedAt:          r.UpdatedAt,
+		Kind:               r.Kind,
+		SkipSteps:          r.SkipSteps,
+		OnlySteps:          r.OnlySteps,
 	}
 	if len(steps) > 0 {
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))
