@@ -66,9 +66,44 @@ type GlobalConfig struct {
 	Intent       IntentRaw
 	Test         TestRaw
 	Verify       VerifyRaw
+	// Notify carries the park/unpark wake hooks. See Notify.
+	Notify Notify `yaml:"-"`
 	// Repos carries maintainer-owned per-repo overrides, keyed by the repo's
 	// working path. See RepoOverride.
 	Repos map[string]RepoOverride `yaml:"repos"`
+}
+
+// Notify is the wake mechanism for a parked run: a command fired when a run
+// enters a gate, a command fired when it leaves, and how long to wait before
+// re-sending a park that nobody answered.
+//
+// It is GLOBAL-ONLY and must stay that way. These are shell commands, and the
+// repo config is read from a pushed branch — a repo-settable notify hook would
+// hand any contributor an `sh -c` on the daemon host. That is the same line the
+// commands.* trust boundary draws (see AGENTS.md "Repo Config Trust Boundary"),
+// and RepoConfig deliberately has no notify field.
+type Notify struct {
+	// OnPark runs when a run parks at a gate, and again on every reminder.
+	OnPark string
+	// OnUnpark runs when the gate is answered (or the wait ends any other way).
+	// It is what stops the last thing a supervisor heard from staying true in
+	// its head forever.
+	OnUnpark string
+	// ReminderInterval is the delay from parking to the first re-send. Later
+	// re-sends back off (see park.Store.Tick). Non-positive disables re-sends;
+	// the durable record is written either way.
+	ReminderInterval time.Duration
+}
+
+// DefaultReminderInterval is the delay from parking to the first re-send of a
+// park notification.
+const DefaultReminderInterval = 10 * time.Minute
+
+// notifyRaw is the on-disk YAML form, with the duration as a string.
+type notifyRaw struct {
+	OnPark           string `yaml:"on_park"`
+	OnUnpark         string `yaml:"on_unpark"`
+	ReminderInterval string `yaml:"reminder_interval"`
 }
 
 // RepoOverride is the per-repo override block in the global config:
@@ -189,6 +224,7 @@ type globalConfigRaw struct {
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
 	Verify               VerifyRaw           `yaml:"verify"`
+	Notify               notifyRaw           `yaml:"notify"`
 
 	Repos map[string]RepoOverride `yaml:"repos"`
 }
@@ -632,6 +668,27 @@ intent:
   slack_days: 3
   # disabled_readers: [codex]
 
+# Wake mechanism for a parked run. When a step parks at a gate (awaiting_approval
+# or fix_review) the pipeline stops until somebody answers, so the run's cost is
+# how long it takes you to FIND OUT it is waiting - not how long the answer takes.
+#
+# on_park runs the moment a run parks, and again on every reminder. on_unpark
+# runs when the gate is answered, so a supervisor never has to guess whether what
+# it last heard still holds. Both are shell commands; they see the wait through
+# NM_EVENT, NM_RUN_ID, NM_REPO, NM_BRANCH, NM_STEP, NM_GATE, NM_SINCE,
+# NM_FINDINGS, NM_ACTIONS, NM_RESPOND, NM_REMINDER, NM_PARKED_FILE, and a
+# ready-to-forward NM_PARK_SUMMARY. A failing hook is logged and never affects
+# the run.
+#
+# reminder_interval is the delay before the first re-send of an unanswered park;
+# later re-sends back off (10m, then 40m, then hourly). Set "off" to disable the
+# re-send. <NM_HOME>/parked.json is written regardless of any of this, and the
+# "no-mistakes parked" command reads it - the record does not depend on config.
+# notify:
+#   on_park: 'printf "%s\n" "$NM_PARK_SUMMARY" >> ~/nm-inbox.txt'
+#   on_unpark: 'printf "resumed: %s\n" "$NM_RUN_ID" >> ~/nm-inbox.txt'
+#   reminder_interval: "10m"
+
 # Test-step evidence artifacts (screenshots, recordings, logs the test step
 # gathers to demonstrate the change works). By default they are kept in a
 # temporary directory and referenced by local path. Opt in to store_in_repo to
@@ -1013,6 +1070,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		DaemonConnectTimeout: DefaultDaemonConnectTimeout,
 		LogLevel:             "info",
 		SessionReuse:         true,
+		Notify:               Notify{ReminderInterval: DefaultReminderInterval},
 	}
 }
 
@@ -1096,7 +1154,35 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.Verify = raw.Verify
 	cfg.Repos = raw.Repos
 
+	cfg.Notify.OnPark = strings.TrimSpace(raw.Notify.OnPark)
+	cfg.Notify.OnUnpark = strings.TrimSpace(raw.Notify.OnUnpark)
+	if raw.Notify.ReminderInterval != "" {
+		d, err := parseReminderInterval(raw.Notify.ReminderInterval)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Notify.ReminderInterval = d
+	}
+
 	return cfg, nil
+}
+
+// parseReminderInterval interprets notify.reminder_interval. The keywords "off"
+// / "none" / "never", and any non-positive duration, disable the re-send. The
+// durable parked record is written either way — only the re-send is opt-out.
+func parseReminderInterval(value string) (time.Duration, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "off", "none", "never":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("parse notify.reminder_interval %q: %w", value, err)
+	}
+	if d < 0 {
+		return 0, nil
+	}
+	return d, nil
 }
 
 // parseCITimeout interprets the ci_timeout config value. The keyword

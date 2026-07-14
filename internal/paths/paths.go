@@ -59,6 +59,15 @@ func (p *Paths) TelemetryGateFile() string {
 	return filepath.Join(p.root, "telemetry-gate.json")
 }
 
+// ParkedFile is the durable record of every run currently parked at a gate: the
+// answer to "is anything waiting on me, since when, for what" that survives the
+// supervising agent dying, restarting, or never having listened. It is state,
+// not a log — the daemon rewrites it whole on every park/unpark transition, so
+// it never carries a stale "last line". See internal/park.
+func (p *Paths) ParkedFile() string {
+	return filepath.Join(p.root, "parked.json")
+}
+
 func (p *Paths) ReposDir() string { return filepath.Join(p.root, "repos") }
 func (p *Paths) RepoDir(repoID string) string {
 	return filepath.Join(p.root, "repos", repoID+".git")
