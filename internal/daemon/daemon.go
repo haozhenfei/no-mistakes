@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/park"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
@@ -144,6 +145,15 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 
 	mgr := NewRunManager(d, p, stepFactory)
 
+	// The wake mechanism for parked runs. Built before recovery so that a run
+	// resumed into its gate below re-announces itself, and Reset() first because
+	// the previous process's parked.json is not this process's truth: a run that
+	// is genuinely still parked re-parks during recovery (with its original park
+	// time), and one that got swept to interrupted must not linger in the file.
+	parkStore := newParkStore(p)
+	parkStore.Reset()
+	mgr.SetParkStore(parkStore)
+
 	// Recover stale runs from a previous daemon crash.
 	recoverOnStartup(d, p, mgr)
 
@@ -151,6 +161,11 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Level-triggered backstop: an edge can be lost (hook failed, machine asleep,
+	// supervisor mid-task), and a park nobody hears about is a stall. This
+	// re-sends until the gate is answered.
+	go parkStore.Run(ctx)
 
 	var shutdownOnce sync.Once
 	doShutdown := func(reason string) {
@@ -211,6 +226,29 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 	}
 	slog.Info("daemon stopped")
 	return nil
+}
+
+// newParkStore builds the park store. The notify config is read on each
+// park/unpark/reminder rather than captured at startup: the daemon runs for
+// weeks, and a user who adds a hook must not have to restart it to be woken.
+//
+// An unreadable config is not fatal: the hooks are lost (and logged), but the
+// durable parked.json record and the reminder schedule still work, because the
+// record is the layer that must never depend on configuration.
+func newParkStore(p *paths.Paths) *park.Store {
+	loadCfg := func() park.Config {
+		globalCfg, err := config.LoadGlobal(p.ConfigFile())
+		if err != nil {
+			slog.Warn("failed to load global config; park notify hooks disabled for this event", "error", err)
+			return park.Config{ReminderInterval: config.DefaultReminderInterval}
+		}
+		return park.Config{
+			OnPark:           globalCfg.Notify.OnPark,
+			OnUnpark:         globalCfg.Notify.OnUnpark,
+			ReminderInterval: globalCfg.Notify.ReminderInterval,
+		}
+	}
+	return park.New(p.ParkedFile(), loadCfg, park.NewShellNotifier(loadCfg, p.ParkedFile()))
 }
 
 func currentDaemonPIDRecord(startTime func(int) (time.Time, error), now func() time.Time) (daemonPIDFile, error) {

@@ -266,6 +266,27 @@ Displays:
 - Daemon status (running/stopped, PID)
 - Active run details: ID, branch, status, head SHA, start time
 
+## no-mistakes parked
+
+Show every run parked at a gate, waiting for an answer.
+
+```sh
+no-mistakes parked [--json]
+```
+
+| Flag     | Type   | Default | Description                   |
+| -------- | ------ | ------- | ----------------------------- |
+| `--json` | `bool` | `false` | Print the record as JSON      |
+
+Reads `<NM_HOME>/parked.json`, the durable record the daemon rewrites on every park/unpark transition.
+For each parked run it prints which step parked, which gate it is at (`awaiting_approval` or `fix_review`), how long it has been waiting, the findings awaiting a decision, and the exact `no-mistakes axi respond` commands that answer it.
+
+Exit code is **0 when something is parked and 1 when nothing is**, so a supervisor can branch on it without parsing output.
+
+It needs no daemon, no socket, and no event stream — that is the point. A notification only reaches whoever was listening at the time; this command answers "is anything waiting on me?" for a supervisor that died, restarted, or was never watching.
+
+See [`notify`](/no-mistakes/reference/global-config/#notify) for the hooks that push the same information to you instead of waiting to be asked.
+
 ## no-mistakes runs
 
 List recorded pipeline runs for the current repo.
