@@ -396,7 +396,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, select
 		// a matching terminal run may predate this push, so do not attach to it.
 		priorRunIDs = nil
 	}
-	pushErr := git.PushWithOptions(ctx, ".", gate.RemoteName, "refs/heads/"+branch, "", false, pushOptions)
+	pushErr := gate.PushHead(ctx, ".", branch, pushOptions)
 
 	if run, _ := waitForTriggeredRunForHead(ctx, env.client, env.repo.ID, branch, headSHA, priorRunIDs, bypassRunID, triggerWaitTimeout); run != nil {
 		return run.ID, nil

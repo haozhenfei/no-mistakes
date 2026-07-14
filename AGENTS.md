@@ -77,6 +77,13 @@ Safest local verification sequence after non-trivial changes:
 - A gate created before this shipped still rejects; `gate.ExplainPushError` turns git's raw refusal into the cause plus the fix (re-run `no-mistakes init`, or `git fetch --unshallow`), and both gate-push call sites (`internal/cli/axi_drive.go`, `wizard.go`) route through it.
 - Regressions: `TestPlainBareRepoRejectsShallowPush`, `TestInitGateAcceptsShallowClonePush`, `TestExplainPushError_OnRealGitRejection` (`internal/gate`), e2e `TestShallowClonedRepoGates` (`SetupOpts.ShallowClone`).
 
+**The Gate Mirror Tracks the Branch, So Its Push Is Forced (`internal/gate/push.go`)**
+
+- Every branch enters the pipeline through `gate.PushHead` (both gate-push call sites: `internal/cli/axi_drive.go`, `wizard.go`), which force-updates `refs/heads/<branch>` in the private mirror. The mirror's one job is to carry the branch's CURRENT head into the daemon, and a legitimately rewritten branch (a rebase onto a freshly cut release branch) is not a descendant of the head the mirror holds - a fast-forward-only push is rejected ("fetch first" / "non-fast-forward"), the run never starts, and the branch stays ungateable until somebody deletes the ref inside the mirror by hand.
+- Forcing that ref destroys nothing, and the reasons are load-bearing: the gate holds only `refs/heads/<branch>`, `refs/remotes/origin/*`, and the `refs/no-mistakes/runs/<id>/head` backups the daemon writes from every run's worktree head (`preserveRunWorktreeHead`) before the worktree goes away - so commits an agent made stay reachable; and the branch on origin keeps its own independent guard (`resolveForcePushDecision`). Never extend this force to any remote that is not the local mirror.
+- The mirror is also where `HandleRerun` resolves a head from (`git rev-parse refs/heads/<branch>` in the gate dir), so a mirror left stale by a refused push is worse than the hard failure it looks like: a later `no-mistakes rerun` validates the old history and reports a normal run.
+- Regressions: `TestPushHead_RebasedBranchStillEntersTheGate`, `TestPushHead_PreservedRunHeadSurvivesTheForcedUpdate` (`internal/gate`), e2e `TestRebasedBranchStillGates`.
+
 **Post-Receive Hook Gate Path Resolution (`internal/git/hook.go`)**
 
 - The hook's `--gate` value must never come from a bare `$(pwd)`: Git can invoke `post-receive` from a cwd that collapses to `.` (issue #269), which the daemon rejects and the pipeline silently never starts. The hook script resolves an absolute gate dir (git first, hook location fallback), and `normalizeNotifyGatePath` in `internal/cli/daemon_cmd.go` is an independent second layer that absolutizes whatever an already-installed older hook sends.
