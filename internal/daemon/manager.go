@@ -17,6 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/park"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
@@ -56,6 +57,12 @@ type RunManager struct {
 	watchFixMu       sync.Mutex
 	watchFixRequests map[string]string
 
+	// park is the wake mechanism for parked runs: it writes <NM_HOME>/parked.json,
+	// fires the notify hooks, and re-sends a park nobody answered. One per
+	// NM_HOME, owned by the daemon (which holds the singleton lock on that
+	// NM_HOME, so it is the file's only writer). Nil in tests that do not care.
+	park *park.Store
+
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
 	subMu          sync.RWMutex
@@ -80,6 +87,23 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		subscribers:      make(map[string][]chan<- ipc.Event),
 		completedRuns:    make(map[string]bool),
 	}
+}
+
+// SetParkStore installs the wake mechanism every executor this manager builds
+// will announce its gates through. The daemon sets it at startup.
+func (m *RunManager) SetParkStore(s *park.Store) {
+	m.park = s
+}
+
+// newExecutor is the single place an executor is built, so the wake mechanism
+// cannot be forgotten on one of the four paths a run can start from (push,
+// rerun, resume, watch).
+func (m *RunManager) newExecutor(cfg *config.Config, ag agent.Agent, execSteps []pipeline.Step) *pipeline.Executor {
+	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	if m.park != nil {
+		executor.SetParkNotifier(m.park)
+	}
+	return executor
 }
 
 // SetWatchStepFactory overrides the steps a watch run executes. Tests use it to
@@ -346,7 +370,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		return
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	executor := m.newExecutor(plan.cfg, plan.agent, plan.steps)
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[plan.run.ID] = executor
@@ -519,7 +543,7 @@ func (m *RunManager) HandleResume(ctx context.Context, repoID, branch, headSHA, 
 	skipped := reusableResumeStepNames(m.db, run.ID, execSteps, headSHA, pipeline.ConfigHash(cfg), skipSteps)
 
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor := m.newExecutor(cfg, ag, execSteps)
 	executor.SetSkippedSteps(skipSteps)
 	done := make(chan struct{})
 	m.mu.Lock()
@@ -1242,7 +1266,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor := m.newExecutor(cfg, ag, execSteps)
 	executor.SetSkippedSteps(skipSteps)
 
 	// Track executor.

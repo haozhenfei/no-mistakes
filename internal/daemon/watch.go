@@ -136,7 +136,7 @@ func (m *RunManager) launchWatchRun(ctx context.Context, repo *db.Repo, run *db.
 	}
 
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor := m.newExecutor(cfg, ag, execSteps)
 	// The QA node and the poll node are one concurrent phase: the PR is watched
 	// from the moment it opens, and the run stays alive - holding its worktree -
 	// until both have converged.

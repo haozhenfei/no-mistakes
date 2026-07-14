@@ -17,6 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/park"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -60,6 +61,12 @@ type Executor struct {
 	waiting     bool                  // true when blocked on approval
 	waitingStep types.StepName        // which step is currently awaiting approval
 
+	// parkNotifier announces gate parks: an edge notification, a durable record
+	// of what the run is waiting for, and a re-send if nobody answers. Nil is
+	// legal and means "do not announce" (unit tests, and any executor built
+	// outside the daemon). It can only observe a gate - never resolve one.
+	parkNotifier ParkNotifier
+
 	// gateSem serializes the approval gate across concurrently-running steps. The
 	// gate is single-occupancy by design - one waitingStep, one approvalCh, one
 	// runs.awaiting_agent_since - and that invariant is what the driving agent,
@@ -70,6 +77,78 @@ type Executor struct {
 	// node keeps running while it waits - only the PARKING is serialized.
 	gateSem chan struct{}
 }
+
+// ParkNotifier is told when a run parks at a gate and when it stops being
+// parked. It is the wake mechanism (internal/park): the edge notification, the
+// durable <NM_HOME>/parked.json record, and the reminder that re-sends a park
+// nobody answered.
+//
+// It is observation only. Nothing it does can approve, skip, or shorten a gate —
+// the point is to make the wait impossible to miss, not to make it quieter.
+type ParkNotifier interface {
+	Park(rec park.Record)
+	Unpark(runID string)
+}
+
+// SetParkNotifier installs the wake mechanism. The daemon passes its per-NM_HOME
+// park store; callers that pass nil get today's behavior with no announcements.
+func (e *Executor) SetParkNotifier(n ParkNotifier) {
+	e.parkNotifier = n
+}
+
+// announcePark publishes the gate this run just entered: which step, which gate,
+// which findings, and which answers it accepts. since is the moment the run
+// parked — on a resumed run that is the ORIGINAL park time carried in
+// runs.awaiting_agent_since, not now, so a daemon restart does not reset the
+// reminder clock on a wait that is already hours old.
+func (e *Executor) announcePark(run *db.Run, repo *db.Repo, stepName types.StepName, gate types.StepStatus, findingsJSON string, since time.Time) {
+	if e.parkNotifier == nil || run == nil {
+		return
+	}
+	rec := park.Record{
+		RunID:    run.ID,
+		Branch:   run.Branch,
+		Step:     string(stepName),
+		Gate:     string(gate),
+		Since:    since,
+		Findings: park.Findings(findingsJSON),
+		Actions:  park.GateActions(),
+	}
+	if repo != nil {
+		rec.RepoID = repo.ID
+		rec.Repo = repo.WorkingPath
+	}
+	rec.Respond = park.RespondCommands(rec.Repo)
+	e.parkNotifier.Park(rec)
+}
+
+func (e *Executor) announceUnpark(runID string) {
+	if e.parkNotifier == nil {
+		return
+	}
+	e.parkNotifier.Unpark(runID)
+}
+
+// The durable record mirrors exactly one thing: the set of runs whose
+// runs.awaiting_agent_since is non-nil. That is why announceUnpark is called on
+// EVERY exit from the approval wait, right beside CompleteRunAwaitingAgent,
+// which clears that column on every exit too - answered, aborted, superseded, or
+// the daemon shutting down.
+//
+// It is tempting to keep the record across a daemon shutdown, on the theory that
+// the person still owes the gate an answer. They do not owe it to THIS run:
+// the shutdown path marks the run interrupted and clears awaiting_agent_since,
+// so the run is no longer parked and `axi respond` has nothing to answer (the
+// run needs `axi resume` first). A record that outlived the column would send a
+// supervisor to answer a gate that no longer exists - and would go on saying so
+// forever, since nothing is left running to retract it. Measured, not assumed:
+// a real daemon SIGTERM against a real parked run leaves the row
+// `interrupted | awaiting_agent_since = NULL`.
+//
+// A daemon that is KILLED never reaches this code at all: the row keeps its
+// awaiting_agent_since, the file keeps the record, and the two stay in agreement
+// with nobody alive to maintain either. Startup Reset() plus the re-park in
+// Resume is what reconciles them afterwards.
 
 // SetSkippedSteps configures steps that should be marked skipped without
 // running. It applies to Execute and to ResumeFrom alike: the skip set is a
@@ -531,7 +610,15 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	)
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
+
+	// A run that was parked when the daemon died is still parked. Re-announce it
+	// with its ORIGINAL park time: the wait did not restart, and the reminder
+	// schedule must not restart either - a run that has been waiting since 21:02
+	// gets its next nudge immediately, not ten minutes after the daemon came back.
+	e.announcePark(run, repo, gate.step.Name(), gate.stepResult.Status, gate.findings, parkStart)
+
 	response, err := e.waitForApproval(ctx, gate.step.Name())
+	e.announceUnpark(run.ID)
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
@@ -1055,7 +1142,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, diffText, "", &executionMS)
 
+		// The park is an edge: announce it and write it down. Everything above is
+		// pollable state, which only helps a supervisor who happens to be looking.
+		e.announcePark(run, repo, stepName, approvalStatus, outcome.Findings, parkStart)
+
 		response, err := e.waitForApproval(ctx, stepName)
+		// Retract the record on every exit from the wait, in lockstep with the DB
+		// column it mirrors (see the note above announceUnpark). A record that
+		// outlives its wait sends a supervisor to answer a gate that is gone.
+		e.announceUnpark(run.ID)
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 			slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 		}

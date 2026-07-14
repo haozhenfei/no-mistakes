@@ -63,6 +63,11 @@ test:
     # upload_cmd: /opt/no-mistakes/upload-evidence.sh
     # upload_timeout: 2m
 
+notify:
+  on_park: 'printf "%s\n" "$NM_PARK_SUMMARY" >> ~/nm-inbox.txt'
+  on_unpark: 'printf "resumed: %s\n" "$NM_RUN_ID" >> ~/nm-inbox.txt'
+  reminder_interval: "10m"
+
 repos:
   /Users/you/projects/monorepo:
     allow_repo_commands: true
@@ -360,6 +365,68 @@ The full hook contract - how the file path is passed, how the URL is read back, 
 Setting it here is trusted by definition (this is your own file on your own machine); in a repo config it is read only from the trusted default branch.
 
 These are global defaults. Per-repo config can override any of these fields.
+
+### notify
+
+The wake mechanism for a parked run.
+
+When a step parks at a gate (`awaiting_approval` or `fix_review`) the pipeline stops until somebody answers it.
+The cost of that gate is therefore not how long the answer takes — it is how long it takes you to *find out* the pipeline is waiting.
+`notify` turns the park from a state you have to remember to poll into an event that arrives.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                      | Type     | Default | Description                                                                   |
+| -------------------------- | -------- | ------- | ----------------------------------------------------------------------------- |
+| `notify.on_park`           | `string` | Empty   | Shell command run when a run parks at a gate, and again on every reminder      |
+| `notify.on_unpark`         | `string` | Empty   | Shell command run when the gate is answered (or the wait ends any other way)   |
+| `notify.reminder_interval` | `string` | `10m`   | Delay before the first re-send of an unanswered park; `off` disables re-sends  |
+
+Both commands run through `sh -c` (`cmd.exe /c` on Windows), bounded at 30 seconds.
+A hook that fails or is missing is logged and otherwise ignored: it can never fail a run, and it can never change how a gate resolves.
+
+`notify` is **global-only by design**. These are shell commands, and a repo config is read from a pushed branch — a repo-settable hook would hand anyone who can push an `sh -c` on the machine running the daemon. `.no-mistakes.yaml` has no `notify` key, and adding one there does nothing.
+
+#### What the hook sees
+
+| Variable          | Value                                                                       |
+| ----------------- | --------------------------------------------------------------------------- |
+| `NM_EVENT`        | `park` or `unpark`                                                          |
+| `NM_REMINDER`     | `0` for the original notification, `1`, `2`, … for each re-send             |
+| `NM_RUN_ID`       | The parked run                                                              |
+| `NM_REPO`         | The working clone path — where `no-mistakes axi respond` must be run        |
+| `NM_BRANCH`       | The branch being gated                                                      |
+| `NM_STEP`         | The step that parked (`review`, `test`, `verify`, …)                        |
+| `NM_GATE`         | `awaiting_approval` or `fix_review`                                          |
+| `NM_SINCE`        | RFC-3339 timestamp of when the run parked                                   |
+| `NM_FINDINGS`     | One line per finding awaiting a decision: id, severity, action, description |
+| `NM_ACTIONS`      | The answers this gate accepts: `approve,fix,skip`                           |
+| `NM_RESPOND`      | The exact commands that send each answer, one per line                      |
+| `NM_PARKED_FILE`  | Path to `parked.json`                                                       |
+| `NM_PARK_SUMMARY` | All of the above, pre-rendered — forward it verbatim to a human or an agent |
+
+#### The reminder cadence
+
+An edge can be lost: the hook can fail, the machine can sleep, the supervisor can be mid-task. A single notification is only "should arrive", so an unanswered park is re-sent.
+
+Gaps back off from `reminder_interval` — with the default, a re-send at 10 minutes, then 40, then 100, then hourly for as long as the gate is unanswered.
+The first nudge is soon because that is the expensive case (a question asked at 21:02 to somebody who is asleep costs ten minutes if the second nudge is fast, and all night if it is not).
+The backoff is what keeps it from becoming noise: a wait nobody is answering settles to roughly one message an hour, not one every ten minutes.
+It never stops entirely — a wait that goes quiet is exactly the stall this exists to prevent.
+Answering the gate stops the re-sends immediately.
+
+#### parked.json
+
+`<NM_HOME>/parked.json` is the durable record of every run currently parked, rewritten in full on every park/unpark transition, and **it does not depend on any of the config above**.
+
+A notification only helps whoever was listening at the time. The file is what a supervisor who died, restarted, or was never watching can read to find out that a run is waiting on them, since when, over which findings, and what answers the gate takes.
+It is state, never a log: there is no stale "last line" to misread, because there are no lines — when nothing is parked, the file is `[]`.
+
+Read it with [`no-mistakes parked`](/no-mistakes/reference/cli/#no-mistakes-parked), which exits 0 when something is parked and 1 when nothing is.
+
+None of this weakens the gate. The run still waits; it just stops waiting in silence.
 
 ### repos
 
