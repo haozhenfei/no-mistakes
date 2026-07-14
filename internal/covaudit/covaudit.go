@@ -167,6 +167,9 @@ func ledgerEntryEqual(a, b coverage.LedgerEntry) bool {
 	if a.State != b.State || a.Reason != b.Reason || a.Source != b.Source {
 		return false
 	}
+	if a.Runtime != b.Runtime || a.RuntimeDetail != b.RuntimeDetail {
+		return false
+	}
 	if len(a.Evidence) != len(b.Evidence) {
 		return false
 	}

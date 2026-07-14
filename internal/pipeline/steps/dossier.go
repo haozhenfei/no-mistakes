@@ -159,10 +159,32 @@ func coverageStateMarker(state string) string {
 	}
 }
 
+// coverageRuntimeMarker maps the machine's instrumentation verdict to a display
+// cell. It is a separate column from the evidence state on purpose: "nobody
+// recorded evidence for this hunk" and "the coverage engine cannot emit records
+// for this construct" are different facts, and the reviewer must be able to tell
+// the engine's blindness (⊘) from code that provably never ran (✗).
+func coverageRuntimeMarker(runtime string) string {
+	switch runtime {
+	case coverage.RuntimeExecuted:
+		return markerCaptured + " executed"
+	case coverage.RuntimeNotExecuted:
+		return "✗ NOT executed"
+	case coverage.RuntimeUninstrumented:
+		return "⊘ uninstrumented (engine blind here)"
+	case coverage.RuntimeNoData:
+		return "— no instrumentation"
+	default:
+		return "—"
+	}
+}
+
 // dossierCoverageSection renders the coverage ledger (design §7 item 3): a hunk
-// table with the four states, machine-backfill marks on runtime-verified rows,
-// and a required reason on every unverified row. Audit issues are surfaced
-// beneath the table so a reviewer sees exactly which changed code nobody ran.
+// table with the four evidence states, the machine's runtime verdict beside
+// each, machine-backfill marks on runtime-verified rows, and a required reason
+// on every unverified row. Audit issues are surfaced beneath the table so a
+// reviewer sees exactly which changed code nobody ran — and, separately, which
+// changed code the coverage engine could not measure at all.
 func dossierCoverageSection(d DossierData) string {
 	if len(d.Ledger) == 0 {
 		return ""
@@ -177,8 +199,8 @@ func dossierCoverageSection(d DossierData) string {
 
 	var b strings.Builder
 	b.WriteString("### Coverage ledger\n\n")
-	b.WriteString("| Hunk | State | Reason / evidence |\n")
-	b.WriteString("| --- | --- | --- |\n")
+	b.WriteString("| Hunk | State | Runtime | Reason / evidence |\n")
+	b.WriteString("| --- | --- | --- | --- |\n")
 	for _, e := range ledger {
 		detail := e.Reason
 		if detail == "" && len(e.Evidence) > 0 {
@@ -188,8 +210,8 @@ func dossierCoverageSection(d DossierData) string {
 			detail = "—"
 		}
 		b.WriteString(fmt.Sprintf(
-			"| %s:%d-%d | %s | %s |\n",
-			mdCell(e.File), e.StartLine, e.EndLine, coverageStateMarker(e.State), mdCell(detail),
+			"| %s:%d-%d | %s | %s | %s |\n",
+			mdCell(e.File), e.StartLine, e.EndLine, coverageStateMarker(e.State), coverageRuntimeMarker(e.Runtime), mdCell(detail),
 		))
 	}
 	if issues := dossierCoverageIssues(d); issues != "" {
@@ -200,13 +222,36 @@ func dossierCoverageSection(d DossierData) string {
 }
 
 func dossierCoverageIssues(d DossierData) string {
-	if d.CoverageReport == nil || len(d.CoverageReport.Issues) == 0 {
+	if d.CoverageReport == nil {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("**Coverage audit issues:**\n\n")
-	for _, is := range d.CoverageReport.Issues {
-		b.WriteString(fmt.Sprintf("- ⚠️ [%s] %s:%d-%d — %s\n", is.Kind, mdCell(is.Hunk.File), is.Hunk.Start, is.Hunk.End, mdCell(is.Detail)))
+	if len(d.CoverageReport.Issues) > 0 {
+		b.WriteString("**Coverage audit issues:**\n\n")
+		for _, is := range d.CoverageReport.Issues {
+			b.WriteString(fmt.Sprintf("- ⚠️ [%s] %s:%d-%d — %s\n", is.Kind, mdCell(is.Hunk.File), is.Hunk.Start, is.Hunk.End, mdCell(is.Detail)))
+		}
+	}
+	// Both lists are rendered even when the audit passes: a hunk that never ran
+	// and a hunk the engine cannot see are the two things a reviewer of this
+	// dossier most needs to know, and neither is an audit "issue".
+	if len(d.CoverageReport.NotExecuted) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("**Changed code instrumentation saw NOT execute:**\n\n")
+		for _, h := range d.CoverageReport.NotExecuted {
+			b.WriteString(fmt.Sprintf("- ✗ %s:%d-%d — zero hits on these lines or the statement enclosing them\n", mdCell(h.File), h.Start, h.End))
+		}
+	}
+	if len(d.CoverageReport.Blind) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("**Changed code the coverage engine could not instrument (unmeasured, NOT unexecuted):**\n\n")
+		for _, h := range d.CoverageReport.Blind {
+			b.WriteString(fmt.Sprintf("- ⊘ %s:%d-%d — no line records emitted here, though the enclosing statement executed\n", mdCell(h.File), h.Start, h.End))
+		}
 	}
 	return b.String()
 }
