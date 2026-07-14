@@ -334,6 +334,21 @@ func PushWithOptions(ctx context.Context, dir, remote, ref, expectedSHA string, 
 	return err
 }
 
+// ForcePushWithOptions pushes HEAD to ref on a remote, force-updating the ref
+// even when HEAD is not a descendant of it. Unlike PushWithOptions it takes no
+// lease anchor: the caller is stating that the remote ref must mirror HEAD
+// whatever it currently holds. Only the local gate mirror is pushed this way -
+// see gate.PushHead for why that is safe there and nowhere else.
+func ForcePushWithOptions(ctx context.Context, dir, remote, ref string, pushOptions []string) error {
+	args := []string{"push"}
+	for _, option := range pushOptions {
+		args = append(args, "-o", option)
+	}
+	args = append(args, "--force", remote, "HEAD:"+ref)
+	_, err := Run(ctx, dir, args...)
+	return err
+}
+
 // LsRemote returns the SHA of a ref on a remote. Returns empty string if the ref doesn't exist.
 func LsRemote(ctx context.Context, dir, remote, ref string) (string, error) {
 	out, err := Run(ctx, dir, "ls-remote", remote, ref)
