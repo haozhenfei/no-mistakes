@@ -108,6 +108,13 @@ Without it, an agent that writes `.no-mistakes.yaml` fails the run with the path
 Pass it only when changing the gate config is the point of the task.
 Like the step set, the permission belongs to the run: a resume, and a fix round derived from the run, carry exactly what the run was started with.
 
+A command that carries `--skip`, `--only`, or `--with` is never reattached to a run that was started with a different step selection, because that run would never execute the requested steps.
+`axi run` with no step flags still reattaches to whatever is running.
+With a selection, it reattaches only when the active run resolved to the same steps; otherwise it starts the run you asked for when the active run is a watch run (the ordinary state of an open pull request, and what `--only qa` is for), and refuses with an error naming the active run when it is a gate run, whose in-flight work starting a new run would supersede.
+
+Selecting `qa` never runs QA inside the run you started: the run records the selection, and the QA pass runs in the watch run that takes the pull request over.
+That run finishing is not a QA verdict.
+
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
 Err on the side of completeness: include the goal, important decisions and tradeoffs, constraints or approaches ruled in or out, and explicit requests that might otherwise look surprising in the diff.

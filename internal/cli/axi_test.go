@@ -633,22 +633,6 @@ func TestActiveRunLookupParamsIncludeBranch(t *testing.T) {
 	}
 }
 
-func TestActiveRunIDForHeadRequiresMatchingHead(t *testing.T) {
-	active := &ipc.GetActiveRunResult{Run: &ipc.RunInfo{ID: "run-old", Status: types.RunRunning, HeadSHA: "old-head"}}
-
-	if got := activeRunIDForHead(active, "new-head"); got != "" {
-		t.Fatalf("mismatched active run ID = %q, want empty", got)
-	}
-	if got := activeRunIDForHead(active, "old-head"); got != "run-old" {
-		t.Fatalf("matching active run ID = %q, want run-old", got)
-	}
-
-	active.Run.Status = types.RunCompleted
-	if got := activeRunIDForHead(active, "old-head"); got != "" {
-		t.Fatalf("terminal active run ID = %q, want empty", got)
-	}
-}
-
 func TestActiveRunInfoForHeadRequiresMatchingHead(t *testing.T) {
 	run := &ipc.RunInfo{ID: "run-old", Status: types.RunRunning, HeadSHA: "old-head"}
 

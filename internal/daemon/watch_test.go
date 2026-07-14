@@ -147,6 +147,24 @@ func waitForRunOfKind(t *testing.T, d *db.DB, repoID string, kind types.RunKind,
 	return nil
 }
 
+// waitForRunIntent waits for a run's intent to be stamped and returns the run.
+func waitForRunIntent(t *testing.T, d *db.DB, runID string) *db.Run {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := d.GetRun(runID)
+		if err != nil {
+			t.Fatalf("get run %s: %v", runID, err)
+		}
+		if run != nil && run.Intent != nil && *run.Intent != "" {
+			return run
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("run %s carries no intent explaining why it exists", runID)
+	return nil
+}
+
 // TestGateRunDerivesWatchRunOnPR is the gate->watch half of the loop: a gate run
 // that opens a PR hands it to a watch run and lets go of its worktree.
 func TestGateRunDerivesWatchRunOnPR(t *testing.T) {
@@ -275,9 +293,12 @@ func TestWatchRunDerivesFixGateRun(t *testing.T) {
 	if fixRun.ParentRunID == nil || *fixRun.ParentRunID != watchID {
 		t.Fatalf("fix run parent = %v, want the watch run %s", fixRun.ParentRunID, watchID)
 	}
-	if fixRun.Intent == nil || *fixRun.Intent == "" {
-		t.Fatal("fix run carries no intent explaining why it exists")
-	}
+	// The intent is stamped by a second statement (startRun inserts the row, then
+	// UpdateRunIntent), so reading it off the row the moment it appears is a race
+	// the poller above can lose on a loaded machine. Every production reader runs
+	// after startRun returns, so waiting here is the honest read, not a papered-
+	// over bug.
+	fixRun = waitForRunIntent(t, d, fixRun.ID)
 
 	select {
 	case run := <-fixRan:

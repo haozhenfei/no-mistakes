@@ -213,7 +213,39 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, selection stepSelection, allowG
 		return emitError(cmd, 1, fmt.Sprintf("get current HEAD: %v", err))
 	}
 
-	runID := activeRunID(env, branch, headSHA)
+	// An active run for this head is normally the run to drive: `axi run` is the
+	// agent's re-attach. But a command that CARRIES a step selection is a
+	// different request, and driving a run that resolved to a different set of
+	// steps would report that run's outcome as if the requested steps had run -
+	// the `--only qa` that never ran QA. So a selection the active run does not
+	// carry is never silently swallowed: it either starts its own run or refuses.
+	var runID, bypassRunID string
+	if active := activeRunForHead(env, branch, headSHA); active != nil {
+		switch {
+		case selection.empty() || runCarriesSelection(active, selection):
+			runID = active.ID
+		case !active.Kind.Watch():
+			// A gate run. (Not `Kind.Gate()`: an older daemon still serving this
+			// socket sends no kind at all, and the safe reading of "unknown" is
+			// the one that refuses rather than the one that supersedes.)
+			// Starting the requested run would supersede this one (see
+			// cancelActiveRuns), throwing away in-flight local work - a worktree,
+			// agent sessions, findings already parked at a gate. That is the
+			// caller's call to make, not ours.
+			return emitError(cmd, 1,
+				fmt.Sprintf("run %s is already active on %q and was not started with the requested steps (%s)", active.ID, branch, describeSelection(selection)),
+				fmt.Sprintf("It runs: skip=%s selection=%s. Driving it would report its outcome as if your steps had run.", formatSteps(active.SkipSteps), formatSteps(active.OnlySteps)),
+				"Wait for it (`no-mistakes axi status`), or cancel it (`no-mistakes axi abort`) and re-run with the selection.")
+		default:
+			// A watch run owns nothing a new run would destroy: it polls the PR,
+			// and the daemon's supersede rules keep the PR watched (a PR-inert
+			// run leaves it alone; a `--only qa` run replaces it with a watcher
+			// that carries the QA node). So the requested run starts, and this
+			// one must not be re-attached to below.
+			bypassRunID = active.ID
+			fmt.Fprintf(cmd.ErrOrStderr(), "  selection: watch run %s does not carry %s; starting a new run for it\n", active.ID, describeSelection(selection))
+		}
+	}
 	if runID == "" {
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
 			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
@@ -234,7 +266,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, selection stepSelection, allowG
 			return guard(cmd)
 		}
 		var err error
-		runID, err = triggerRun(ctx, env, branch, headSHA, selection, allowGateConfig, intent)
+		runID, err = triggerRun(ctx, env, branch, headSHA, selection, allowGateConfig, intent, bypassRunID)
 		if err != nil {
 			return emitError(cmd, 1, err.Error(), gatePushHelp(err)...)
 		}
@@ -254,21 +286,54 @@ func configErrorForFreshAxiRun(env *axiEnv, runID string) error {
 	return env.globalConfigErr
 }
 
-// activeRunID returns the ID of a non-terminal run for branch and head, or "" if none.
-func activeRunID(env *axiEnv, branch, headSHA string) string {
+// activeRunForHead returns the non-terminal run for branch and head, or nil if none.
+func activeRunForHead(env *axiEnv, branch, headSHA string) *ipc.RunInfo {
 	var active ipc.GetActiveRunResult
 	if err := env.client.Call(ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
-		return ""
+		return nil
 	}
-	return activeRunIDForHead(&active, headSHA)
+	return activeRunInfoForHead(active.Run, headSHA)
 }
 
-func activeRunIDForHead(active *ipc.GetActiveRunResult, headSHA string) string {
-	run := activeRunInfoForHead(active.Run, headSHA)
-	if run == nil {
-		return ""
+// runCarriesSelection reports whether run was started with exactly the steps this
+// invocation asks for. The comparison is on the RESOLVED pair the daemon persists
+// (skip set + selection), through the same resolver the daemon uses, so `--only
+// qa` matches a run started with `--only qa` and nothing else - and an agent that
+// re-issues the identical command after a disconnect re-attaches instead of
+// starting a second run.
+func runCarriesSelection(run *ipc.RunInfo, selection stepSelection) bool {
+	skip, named := types.ResolveRunSteps(selection.skip, selection.only, selection.with)
+	return types.SameStepSet(run.SkipSteps, skip) && types.SameStepSet(run.OnlySteps, named)
+}
+
+// describeSelection renders the flags the caller passed, for the error that
+// refuses to swallow them.
+func describeSelection(selection stepSelection) string {
+	var parts []string
+	if len(selection.only) > 0 {
+		parts = append(parts, "--only "+formatSteps(selection.only))
 	}
-	return run.ID
+	if len(selection.skip) > 0 {
+		parts = append(parts, "--skip "+formatSteps(selection.skip))
+	}
+	if len(selection.with) > 0 {
+		parts = append(parts, "--with "+formatSteps(selection.with))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatSteps(steps []types.StepName) string {
+	if len(steps) == 0 {
+		return "none"
+	}
+	names := make([]string, 0, len(steps))
+	for _, step := range steps {
+		names = append(names, string(step))
+	}
+	return strings.Join(names, ",")
 }
 
 func activeRunInfoForHead(run *ipc.RunInfo, headSHA string) *ipc.RunInfo {
@@ -310,8 +375,14 @@ func preflightGuard(ctx context.Context, env *axiEnv, branch string) func(*cobra
 // triggerRun starts a fresh run for branch: it pushes the current HEAD through
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
-// active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, selection stepSelection, allowGateConfig bool, intent string) (string, error) {
+// active run first (see activeRunForHead) and apply pre-flight guards.
+//
+// bypassRunID names an active run the caller deliberately declined to drive
+// (it does not carry the requested step selection). It must never be handed back
+// as "the run this trigger started": the gate already has this commit, so the
+// push is a no-op, and without excluding it the poll below would return that same
+// run - swallowing the selection through the back door.
+func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, selection stepSelection, allowGateConfig bool, intent, bypassRunID string) (string, error) {
 	pushOptions := selection.pushOptions()
 	if opt := formatAllowGateConfigPushOption(allowGateConfig); opt != "" {
 		pushOptions = append(pushOptions, opt)
@@ -327,7 +398,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, select
 	}
 	pushErr := git.PushWithOptions(ctx, ".", gate.RemoteName, "refs/heads/"+branch, "", false, pushOptions)
 
-	if run, _ := waitForTriggeredRunForHead(ctx, env.client, env.repo.ID, branch, headSHA, priorRunIDs, triggerWaitTimeout); run != nil {
+	if run, _ := waitForTriggeredRunForHead(ctx, env.client, env.repo.ID, branch, headSHA, priorRunIDs, bypassRunID, triggerWaitTimeout); run != nil {
 		return run.ID, nil
 	}
 	if !shouldRerunAfterNoActiveRun(pushErr) {
@@ -371,8 +442,16 @@ func runsForHead(client *ipc.Client, repoID, branch, headSHA string) ([]ipc.RunI
 // waitForTriggeredRunForHead waits for the run created by this trigger. The
 // active-run lookup handles normal execution; the head lookup catches a run
 // that fails before it can be observed as active. priorRunIDs prevents an
-// up-to-date push from attaching to a terminal run created by an earlier one.
-func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID, branch, headSHA string, priorRunIDs map[string]struct{}, timeout time.Duration) (*ipc.RunInfo, error) {
+// up-to-date push from attaching to a terminal run created by an earlier one,
+// and bypassRunID (see triggerRun) excludes the active run the caller declined.
+//
+// What a trigger produces is always a GATE run. The branch's newest active run
+// can be a WATCH run - the gate run's own handoff derives one the moment it opens
+// (or, for `--only qa`, adopts) a PR, and a short gate run wins that race often
+// enough to matter. Handing that watcher back as "the run this trigger started"
+// would make the drive loop follow a different run than the one the caller's
+// flags created, so a watch run is never a candidate here.
+func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID, branch, headSHA string, priorRunIDs map[string]struct{}, bypassRunID string, timeout time.Duration) (*ipc.RunInfo, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
@@ -387,7 +466,7 @@ func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID,
 		if err := client.Call(ipc.MethodGetActiveRun, &ipc.GetActiveRunParams{RepoID: repoID, Branch: branch}, &result); err != nil {
 			return nil, err
 		}
-		if run := activeRunInfoForHead(result.Run, headSHA); run != nil {
+		if run := activeRunInfoForHead(result.Run, headSHA); run != nil && triggerProduct(run, bypassRunID) {
 			return run, nil
 		}
 		if priorRunIDs != nil {
@@ -397,10 +476,12 @@ func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID,
 			}
 			for i := range runs {
 				run := &runs[i]
-				if _, existed := priorRunIDs[run.ID]; !existed {
+				if _, existed := priorRunIDs[run.ID]; existed {
+					continue
+				}
+				if triggerProduct(run, bypassRunID) {
 					return run, nil
 				}
-				break
 			}
 		}
 		select {
@@ -411,6 +492,15 @@ func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID,
 		case <-poll.C:
 		}
 	}
+}
+
+// triggerProduct reports whether run could be what this trigger created: a gate
+// run, and not the active run the caller declined to drive (bypassRunID). A watch
+// run is never a trigger's product - it is derived by the daemon from a gate run
+// that finished - so following one here would silently drive a different run than
+// the caller's flags asked for.
+func triggerProduct(run *ipc.RunInfo, bypassRunID string) bool {
+	return run.ID != bypassRunID && !run.Kind.Watch()
 }
 
 func shouldRerunAfterNoActiveRun(pushErr error) bool {
@@ -696,6 +786,11 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 		// and poll CI itself - which is exactly what it must not do.
 		if rv.PRURL != "" && monitorStepName(rv) == "" {
 			help = append(help, staleMonitorGuidance)
+		}
+		// The run selected qa but ran no qa step: the QA pass belongs to the
+		// watch run this hands off to. Say so, or "passed" reads as "QA passed".
+		if types.SelectsQA(run.OnlySteps) && monitorStepName(rv) == "" {
+			help = append(help, qaHandoffGuidance)
 		}
 		fields = append(fields, toon.Field{Key: "help", Value: help})
 		emitDoc(cmd, fields...)

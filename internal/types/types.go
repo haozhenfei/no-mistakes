@@ -221,6 +221,95 @@ func SelectsQA(selection []StepName) bool {
 	return false
 }
 
+// ResolveRunSteps turns a caller's step selection into the two facts a run row
+// records. It lives here, not in the daemon, because the CLI has to answer the
+// same question before it starts a run: an `axi run` that carries a selection
+// must not re-attach to a run that resolved to a different one (see
+// runCarriesSelection in internal/cli).
+//
+// selection (runs.only_steps) is every step the caller NAMED, whether through
+// --only or --with. It is read positively, and today it answers exactly one
+// question: does the PR handoff derive a QA run? A NULL selection - every
+// ordinary run, and every row written before qa existed - names nothing, so no.
+// Inferring that from the skip set instead would be unsound in both directions:
+// qa is absent from the skip set both when a run selected it and on every legacy
+// row.
+//
+// skip (runs.skip_steps) is what the gate pipeline must not execute:
+//
+//   - --only <steps>: everything the run could execute and was not named.
+//   - otherwise: the caller's --skip set, plus every on-demand step the caller
+//     did not name - so an ordinary push never pays for a QA pass it did not ask
+//     for, and `--with qa` does not contradict itself by recording qa as skipped.
+//
+// The skip set is what a later resume reads back, so a resumed run keeps the same
+// shape without the caller repeating the flag.
+func ResolveRunSteps(skip, only, with []StepName) (skipSet, selection []StepName) {
+	for _, step := range only {
+		if !ContainsStep(selection, step) {
+			selection = append(selection, step)
+		}
+	}
+	for _, step := range with {
+		if !ContainsStep(selection, step) {
+			selection = append(selection, step)
+		}
+	}
+
+	if len(only) > 0 {
+		named := make(map[StepName]bool, len(selection))
+		for _, step := range selection {
+			named[step] = true
+		}
+		for _, step := range SelectableSteps() {
+			if !named[step] {
+				skipSet = append(skipSet, step)
+			}
+		}
+		return skipSet, selection
+	}
+
+	skipSet = append(skipSet, skip...)
+	for _, step := range OnDemandSteps() {
+		if !ContainsStep(selection, step) && !ContainsStep(skipSet, step) {
+			skipSet = append(skipSet, step)
+		}
+	}
+	return skipSet, selection
+}
+
+// ContainsStep reports whether steps names step.
+func ContainsStep(steps []StepName, step StepName) bool {
+	for _, s := range steps {
+		if s == step {
+			return true
+		}
+	}
+	return false
+}
+
+// SameStepSet reports whether two step lists name the same steps, ignoring order
+// and duplicates.
+func SameStepSet(a, b []StepName) bool {
+	seen := make(map[StepName]bool, len(a))
+	for _, step := range a {
+		seen[step] = true
+	}
+	other := make(map[StepName]bool, len(b))
+	for _, step := range b {
+		other[step] = true
+	}
+	if len(seen) != len(other) {
+		return false
+	}
+	for step := range seen {
+		if !other[step] {
+			return false
+		}
+	}
+	return true
+}
+
 // IsOnDemandStep reports whether a step only runs when explicitly selected.
 func IsOnDemandStep(s StepName) bool {
 	for _, step := range OnDemandSteps() {

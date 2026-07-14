@@ -961,58 +961,13 @@ type runSpec struct {
 }
 
 // resolveRunSteps turns a caller's step selection into the two facts a run row
-// records. It is the ONLY place the on/off stances meet, so every way a gate run
-// is born (push, rerun, watch-derived fix round, wizard) gets the same answer.
-//
-// selection (runs.only_steps) is every step the caller NAMED, whether through
-// --only or --with. It is read positively, and today it answers exactly one
-// question: does the PR handoff derive a QA run? A NULL selection - every
-// ordinary run, and every row written before qa existed - names nothing, so no.
-// Inferring that from the skip set instead would be unsound in both directions:
-// qa is absent from the skip set both when a run selected it and on every legacy
-// row.
-//
-// skip (runs.skip_steps) is what the gate pipeline must not execute:
-//
-//   - --only <steps>: everything the run could execute and was not named.
-//   - otherwise: the caller's --skip set, plus every on-demand step the caller
-//     did not name - so an ordinary push never pays for a QA pass it did not ask
-//     for, and `--with qa` does not contradict itself by recording qa as skipped.
-//
-// The skip set is what a later resume reads back, so a resumed run keeps the same
-// shape without the caller repeating the flag.
+// records: the skip set and the selection. Every way a gate run is born (push,
+// rerun, watch-derived fix round, wizard) goes through it, so they all get the
+// same answer - and so does the CLI, which must resolve a selection the same way
+// to tell whether an already-active run carries it. The rules live on
+// types.ResolveRunSteps.
 func resolveRunSteps(skip, only, with []types.StepName) (skipSet, selection []types.StepName) {
-	for _, step := range only {
-		if !containsStep(selection, step) {
-			selection = append(selection, step)
-		}
-	}
-	for _, step := range with {
-		if !containsStep(selection, step) {
-			selection = append(selection, step)
-		}
-	}
-
-	if len(only) > 0 {
-		named := make(map[types.StepName]bool, len(selection))
-		for _, step := range selection {
-			named[step] = true
-		}
-		for _, step := range types.SelectableSteps() {
-			if !named[step] {
-				skipSet = append(skipSet, step)
-			}
-		}
-		return skipSet, selection
-	}
-
-	skipSet = append(skipSet, skip...)
-	for _, step := range types.OnDemandSteps() {
-		if !containsStep(selection, step) && !containsStep(skipSet, step) {
-			skipSet = append(skipSet, step)
-		}
-	}
-	return skipSet, selection
+	return types.ResolveRunSteps(skip, only, with)
 }
 
 // execStepsFor returns the steps a run executes.
