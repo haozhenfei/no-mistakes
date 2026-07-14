@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/coverage"
@@ -112,5 +114,57 @@ func TestDeleteCoverageEntriesByRun(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("coverage entries after delete = %d, want 0", len(got))
+	}
+}
+
+// TestOpenMigratesCoverageEntriesRuntimeColumns: an existing database has
+// coverage_entries without the runtime columns. Open must add them, and a legacy
+// row must read back with an empty runtime class — "this row was never audited
+// for its runtime class", which every caller treats as no backing at all, rather
+// than as a silent pass.
+func TestOpenMigratesCoverageEntriesRuntimeColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
+	legacyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	if _, err := legacyDB.Exec(`
+		CREATE TABLE coverage_entries (
+			id            TEXT PRIMARY KEY,
+			run_id        TEXT NOT NULL,
+			file          TEXT NOT NULL,
+			start_line    INTEGER NOT NULL,
+			end_line      INTEGER NOT NULL,
+			state         TEXT NOT NULL,
+			reason        TEXT,
+			evidence_json TEXT,
+			source        TEXT,
+			created_at    INTEGER NOT NULL
+		);
+		INSERT INTO coverage_entries (id, run_id, file, start_line, end_line, state, created_at)
+		VALUES ('cov-legacy', 'run-legacy', 'src/Row.tsx', 14, 14, 'attested', 1);
+	`); err != nil {
+		legacyDB.Close()
+		t.Fatalf("create legacy coverage_entries table: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	d, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open migrated db: %v", err)
+	}
+	defer d.Close()
+
+	entries, err := d.GetCoverageEntriesByRun("run-legacy")
+	if err != nil {
+		t.Fatalf("get coverage entries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v, want the legacy row preserved", entries)
+	}
+	if entries[0].Runtime != "" || entries[0].Blind() {
+		t.Fatalf("legacy row Runtime = %q, want empty (never audited), and never blind", entries[0].Runtime)
 	}
 }

@@ -33,6 +33,27 @@ type BehaviorGap struct {
 	Detail string
 }
 
+// BlindSpot is a behavior-class claim whose changed code the coverage engine
+// could not account for: no hunk backing it is runtime-verified, but no hunk
+// backing it is un-executed either — the engine emitted no records for those
+// lines while the statements enclosing them ran.
+//
+// This is NOT a BehaviorGap. A gap means the machine looked and found the code
+// never ran; a blind spot means the machine cannot look. Capping a claim for the
+// second is what turned a v8/JSX className change into two "NO RUNTIME EVIDENCE"
+// findings on coze MR 6951 against the skeptics' own CONFIRMED verdicts. The
+// verify step therefore leaves the verdict alone and reports the blindness as a
+// visible finding: unmeasured, not unbacked.
+type BlindSpot struct {
+	ClaimID string
+	Kind    string
+	Text    string
+	// Hunks are the uninstrumented hunks backing the claim.
+	Hunks []Hunk
+	// Detail explains, in one sentence, what the engine could not see.
+	Detail string
+}
+
 // IsBehaviorKind reports whether a claim kind asserts runtime-observable
 // behavior. rule-compliance and non-goal claims make no runtime assertion, so
 // they are not subject to the runtime-backing requirement.
@@ -40,10 +61,12 @@ func IsBehaviorKind(kind string) bool {
 	return kind == claims.KindBehavior || kind == claims.KindRegressionFixed
 }
 
-// UnbackedBehaviorClaims returns one BehaviorGap per behavior-class claim that
-// no runtime-verified hunk supports. ledger must be the POST-backfill ledger, so
-// runtime-verified means "instrumentation actually executed this hunk", never an
-// agent label.
+// BehaviorBacking splits the behavior-class claims into the two ways a runtime
+// pass can lack instrumentation behind it: gaps (the machine looked and the code
+// did not run, or nothing was captured at all) and blind spots (the machine
+// cannot look, because the engine emits no records for those lines while the
+// code around them ran). ledger must be the POST-backfill ledger, so both the
+// runtime-verified state and the Runtime class are machine facts, never labels.
 //
 // Backing is decided per claim when the claim names hunks it covers
 // (`claim add --hunks file:start-end`), and run-wide otherwise: a claim that
@@ -54,19 +77,31 @@ func IsBehaviorKind(kind string) bool {
 // `evidence coverage` promotes the hunks it executes) while still firing for a
 // run like 6951, where nothing ran.
 //
+// A gap always wins over a blind spot. If ANY hunk backing the claim is
+// positively un-executed, the claim is unbacked even when its other hunks are
+// only uninstrumented: one line of provably dead changed code is enough to sink
+// a runtime pass, and the engine's blindness elsewhere cannot buy it back.
+//
 // An empty ledger — including the fail-closed case where the coverage audit
 // could not run — leaves every behavior claim unbacked. "Could not check" is not
-// "checked and clean".
-func UnbackedBehaviorClaims(cs []claims.Claim, ledger []LedgerEntry) []BehaviorGap {
-	runtimeSomewhere := false
+// "checked and clean"; and a hunk with no Runtime class at all (an old row, a
+// file no instrumentation reached) is a gap, not a blind spot, because a blind
+// spot is a POSITIVE finding about an executed enclosing statement.
+func BehaviorBacking(cs []claims.Claim, ledger []LedgerEntry) ([]BehaviorGap, []BlindSpot) {
+	runtimeSomewhere, notExecutedSomewhere, blindSomewhere := false, false, false
 	for _, e := range ledger {
-		if e.State == StateRuntimeVerified {
+		switch {
+		case backedByRuntime(e):
 			runtimeSomewhere = true
-			break
+		case e.Runtime == RuntimeNotExecuted:
+			notExecutedSomewhere = true
+		case e.Blind():
+			blindSomewhere = true
 		}
 	}
 
 	var gaps []BehaviorGap
+	var blind []BlindSpot
 	for _, c := range cs {
 		if !IsBehaviorKind(c.Kind) || c.SelfAttested() {
 			// Self-attested claims are already excluded from the conclusions by
@@ -76,39 +111,111 @@ func UnbackedBehaviorClaims(cs []claims.Claim, ledger []LedgerEntry) []BehaviorG
 		}
 		named := matchLedgerEntries(c.Hunks, ledger)
 		if len(named) > 0 {
-			if anyRuntimeVerified(named) {
+			switch {
+			case anyRuntimeVerified(named):
 				continue
+			case anyNotExecuted(named):
+				gaps = append(gaps, BehaviorGap{
+					ClaimID: c.ID,
+					Kind:    c.Kind,
+					Text:    c.Text,
+					Hunks:   entryHunks(named),
+					Detail: fmt.Sprintf("instrumentation watched the changed code it names and recorded zero hits on %s; none of its hunks is runtime-verified, so the code it claims to have fixed never ran",
+						describeHunks(notExecutedEntries(named))),
+				})
+			case anyBlind(named):
+				blind = append(blind, BlindSpot{
+					ClaimID: c.ID,
+					Kind:    c.Kind,
+					Text:    c.Text,
+					Hunks:   entryHunks(blindEntries(named)),
+					Detail: fmt.Sprintf("the coverage engine emitted no line records for %s, though the statements enclosing them executed — the change is unmeasured, not unexecuted",
+						describeHunks(blindEntries(named))),
+				})
+			default:
+				gaps = append(gaps, BehaviorGap{
+					ClaimID: c.ID,
+					Kind:    c.Kind,
+					Text:    c.Text,
+					Hunks:   entryHunks(named),
+					Detail: fmt.Sprintf("every hunk it names is %s; none is runtime-verified, so no instrumentation ever executed the changed code it claims to have fixed",
+						describeStates(named)),
+				})
 			}
+			continue
+		}
+		switch {
+		case runtimeSomewhere:
+			continue
+		case !notExecutedSomewhere && blindSomewhere:
+			blind = append(blind, BlindSpot{
+				ClaimID: c.ID,
+				Kind:    c.Kind,
+				Text:    c.Text,
+				Detail:  "no changed hunk in this run is runtime-verified, but the coverage engine emitted no records for the changed lines it could not instrument while the code enclosing them ran — the change is unmeasured, not unexecuted",
+			})
+		default:
 			gaps = append(gaps, BehaviorGap{
 				ClaimID: c.ID,
 				Kind:    c.Kind,
 				Text:    c.Text,
-				Hunks:   entryHunks(named),
-				Detail: fmt.Sprintf("every hunk it names is %s; none is runtime-verified, so no instrumentation ever executed the changed code it claims to have fixed",
-					describeStates(named)),
+				Detail:  "no changed hunk in this run is runtime-verified — the run captured no instrumentation showing the changed code executing",
 			})
-			continue
 		}
-		if runtimeSomewhere {
-			continue
-		}
-		gaps = append(gaps, BehaviorGap{
-			ClaimID: c.ID,
-			Kind:    c.Kind,
-			Text:    c.Text,
-			Detail:  "no changed hunk in this run is runtime-verified — the run captured no instrumentation showing the changed code executing",
-		})
 	}
-	return gaps
+	return gaps, blind
+}
+
+// backedByRuntime reports whether instrumentation executed the entry's hunk. The
+// State fallback covers a ledger read back from a row written before the runtime
+// class existed, where runtime-verified was still backfill-derived.
+func backedByRuntime(e LedgerEntry) bool {
+	if e.Runtime != "" {
+		return e.Runtime == RuntimeExecuted
+	}
+	return e.State == StateRuntimeVerified
 }
 
 func anyRuntimeVerified(entries []LedgerEntry) bool {
 	for _, e := range entries {
-		if e.State == StateRuntimeVerified {
+		if backedByRuntime(e) {
 			return true
 		}
 	}
 	return false
+}
+
+func anyNotExecuted(entries []LedgerEntry) bool { return len(notExecutedEntries(entries)) > 0 }
+
+func anyBlind(entries []LedgerEntry) bool { return len(blindEntries(entries)) > 0 }
+
+func notExecutedEntries(entries []LedgerEntry) []LedgerEntry {
+	var out []LedgerEntry
+	for _, e := range entries {
+		if e.Runtime == RuntimeNotExecuted {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func blindEntries(entries []LedgerEntry) []LedgerEntry {
+	var out []LedgerEntry
+	for _, e := range entries {
+		if e.Blind() {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func describeHunks(entries []LedgerEntry) string {
+	hs := entryHunks(entries)
+	parts := make([]string, 0, len(hs))
+	for _, h := range hs {
+		parts = append(parts, fmt.Sprintf("%s:%d-%d", h.File, h.Start, h.End))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func entryHunks(entries []LedgerEntry) []Hunk {

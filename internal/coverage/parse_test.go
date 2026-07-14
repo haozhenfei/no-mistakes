@@ -20,10 +20,13 @@ github.com/org/repo/bar.go:5.1,7.1 1 1
 		t.Errorf("Format = %q, want %q", got.Format, FormatGo)
 	}
 	// foo.go: covered blocks 10-12 and 14-16 (12-14 has count 0). Adjacent? 12
-	// and 14 are not adjacent (gap at 13), so two ranges.
+	// and 14 are not adjacent (gap at 13), so two ranges. The zero-count block is
+	// kept as Uncovered — it is the engine positively saying "these lines did not
+	// run", which is what tells a dead hunk apart from one the engine never
+	// instrumented.
 	want := []FileCoverage{
-		{File: "github.com/org/repo/bar.go", Covered: []LineRange{{5, 7}}},
-		{File: "github.com/org/repo/foo.go", Covered: []LineRange{{10, 12}, {14, 16}}},
+		{File: "github.com/org/repo/bar.go", Covered: []LineRange{{5, 7}}, Enumerated: true},
+		{File: "github.com/org/repo/foo.go", Covered: []LineRange{{10, 12}, {14, 16}}, Uncovered: []LineRange{{12, 14}}, Enumerated: true},
 	}
 	if !reflect.DeepEqual(got.Files, want) {
 		t.Fatalf("Files = %+v, want %+v", got.Files, want)
@@ -40,7 +43,7 @@ p/x.go:2.1,3.1 1 2
 		t.Fatalf("ParseGoProfile: %v", err)
 	}
 	// 1-2 and 2-3 overlap → merge to 1-3.
-	want := []FileCoverage{{File: "p/x.go", Covered: []LineRange{{1, 3}}}}
+	want := []FileCoverage{{File: "p/x.go", Covered: []LineRange{{1, 3}}, Enumerated: true}}
 	if !reflect.DeepEqual(got.Files, want) {
 		t.Fatalf("Files = %+v, want %+v", got.Files, want)
 	}
@@ -73,9 +76,10 @@ end_of_record
 		t.Fatalf("ParseLCOV: %v", err)
 	}
 	want := []FileCoverage{
-		// login.ts: 40,41 covered (adjacent→40-41), 42 not, 43 covered.
-		{File: "src/login.ts", Covered: []LineRange{{40, 41}, {43, 43}}},
-		{File: "src/util.ts", Covered: []LineRange{{2, 2}}},
+		// login.ts: 40,41 covered (adjacent→40-41), 42 instrumented-but-unexecuted,
+		// 43 covered.
+		{File: "src/login.ts", Covered: []LineRange{{40, 41}, {43, 43}}, Uncovered: []LineRange{{42, 42}}, Enumerated: true},
+		{File: "src/util.ts", Covered: []LineRange{{2, 2}}, Uncovered: []LineRange{{1, 1}}, Enumerated: true},
 	}
 	if !reflect.DeepEqual(got.Files, want) {
 		t.Fatalf("Files = %+v, want %+v", got.Files, want)

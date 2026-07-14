@@ -41,7 +41,7 @@ func SupportedFormat(format string) bool {
 // A block counts as covered when count > 0. Blocks from the same file are merged
 // into coalesced line ranges. The leading "mode:" line is ignored.
 func ParseGoProfile(raw string) (CoverageData, error) {
-	perFile := map[string][]LineRange{}
+	perFile := map[string]*fileRecords{}
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "mode:") {
@@ -51,9 +51,7 @@ func ParseGoProfile(raw string) (CoverageData, error) {
 		if err != nil {
 			return CoverageData{}, err
 		}
-		if count > 0 {
-			perFile[file] = append(perFile[file], rng)
-		}
+		recordsFor(perFile, file).add(rng, count > 0)
 	}
 	return CoverageData{Format: FormatGo, Files: buildFiles(perFile)}, nil
 }
@@ -114,10 +112,13 @@ func lineOf(token string) (int, error) {
 //	DA:<line>,<hits> line execution data
 //	end_of_record   close the file record
 //
-// A line with hits > 0 is covered. Consecutive covered lines are coalesced into
-// ranges.
+// A line with hits > 0 is covered; a DA line with 0 hits is instrumented but
+// unexecuted, and is recorded as such — that is the engine positively saying
+// "this line did not run", as distinct from a line it emitted no DA for at all
+// (v8 emits no DA for a JSX attribute line; it folds it into the enclosing
+// `return`). Consecutive lines of the same kind are coalesced into ranges.
 func ParseLCOV(raw string) (CoverageData, error) {
-	perFile := map[string][]LineRange{}
+	perFile := map[string]*fileRecords{}
 	var file string
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
@@ -138,9 +139,7 @@ func ParseLCOV(raw string) (CoverageData, error) {
 			if err != nil {
 				return CoverageData{}, fmt.Errorf("coverage: bad lcov hit count in %q: %w", line, err)
 			}
-			if hits > 0 {
-				perFile[file] = append(perFile[file], LineRange{Start: ln, End: ln})
-			}
+			recordsFor(perFile, file).add(LineRange{Start: ln, End: ln}, hits > 0)
 		case line == "end_of_record":
 			file = ""
 		}
@@ -148,12 +147,44 @@ func ParseLCOV(raw string) (CoverageData, error) {
 	return CoverageData{Format: FormatLCOV, Files: buildFiles(perFile)}, nil
 }
 
+// fileRecords accumulates one file's executed and instrumented-but-unexecuted
+// line ranges while parsing.
+type fileRecords struct {
+	covered   []LineRange
+	uncovered []LineRange
+}
+
+func (r *fileRecords) add(rng LineRange, hit bool) {
+	if hit {
+		r.covered = append(r.covered, rng)
+		return
+	}
+	r.uncovered = append(r.uncovered, rng)
+}
+
+func recordsFor(perFile map[string]*fileRecords, file string) *fileRecords {
+	r, ok := perFile[file]
+	if !ok {
+		r = &fileRecords{}
+		perFile[file] = r
+	}
+	return r
+}
+
 // buildFiles coalesces per-file line ranges into sorted, merged FileCoverage
-// records so the structured output is deterministic and compact.
-func buildFiles(perFile map[string][]LineRange) []FileCoverage {
+// records so the structured output is deterministic and compact. Every file a
+// parser produces is Enumerated: both executed and unexecuted records were read
+// from the profile, so a line in neither list is a line the engine emitted no
+// record for.
+func buildFiles(perFile map[string]*fileRecords) []FileCoverage {
 	files := make([]FileCoverage, 0, len(perFile))
-	for file, ranges := range perFile {
-		files = append(files, FileCoverage{File: file, Covered: mergeRanges(ranges)})
+	for file, r := range perFile {
+		files = append(files, FileCoverage{
+			File:       file,
+			Covered:    mergeRanges(r.covered),
+			Uncovered:  mergeRanges(r.uncovered),
+			Enumerated: true,
+		})
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].File < files[j].File })
 	return files

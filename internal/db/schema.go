@@ -150,7 +150,9 @@ CREATE TABLE IF NOT EXISTS coverage_entries (
     reason        TEXT,
     evidence_json TEXT,
     source        TEXT,
-    created_at    INTEGER NOT NULL
+    created_at    INTEGER NOT NULL,
+    runtime       TEXT,
+    runtime_detail TEXT
 );
 `
 
@@ -194,6 +196,11 @@ var migrationStatements = []string{
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+	// The coverage ledger's runtime dimension: what instrumentation actually saw
+	// (executed / not-executed / uninstrumented / no-data), as distinct from the
+	// evidence class in `state`. NULL on rows written before it existed.
+	`ALTER TABLE coverage_entries ADD COLUMN runtime TEXT`,
+	`ALTER TABLE coverage_entries ADD COLUMN runtime_detail TEXT`,
 	`ALTER TABLE step_results ADD COLUMN validated_head_sha TEXT`,
 	`ALTER TABLE step_results ADD COLUMN config_hash TEXT`,
 }

@@ -117,7 +117,7 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// ledger decides whether a behavior-class claim has any runtime evidence at
 	// all. A claim with none can never be recorded as CONFIRMED below.
 	coverageFindings, coverageSummary, ledger := s.runCoverageAudit(sctx)
-	gaps := coverage.UnbackedBehaviorClaims(claimList, ledger)
+	gaps, blindSpots := coverage.BehaviorBacking(claimList, ledger)
 	gapByClaim := make(map[string]coverage.BehaviorGap, len(gaps))
 	for _, g := range gaps {
 		gapByClaim[g.ClaimID] = g
@@ -185,12 +185,32 @@ func (s *VerifyStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		})
 	}
 
+	// A blind spot is the opposite finding from a gap, and it must not be dressed
+	// up as one. The machine did not observe the changed code failing to run — it
+	// could not observe those lines at all, while the statements enclosing them
+	// executed. The skeptic's verdict therefore stands (no cap, no parking), but
+	// the limit of the measurement is stated on the record so nobody reads the
+	// pass as instrumentation-backed. This is the coze MR 6951 shape: v8 emits no
+	// DA record for a JSX attribute line, and capping there contradicted the
+	// skeptics' own CONFIRMED verdicts on evidence they had independently checked.
+	for _, b := range blindSpots {
+		findings = append(findings, Finding{
+			Severity: "warning",
+			Action:   types.ActionNoOp,
+			Description: fmt.Sprintf("COVERAGE BLIND SPOT (verdict NOT capped) for %s claim %q — %s. The verdict stands on the skeptic's evidence; runtime instrumentation neither confirms nor denies it. To measure it, use a coverage provider that instruments these lines (e.g. istanbul rather than v8 for JSX attributes).",
+				b.Kind, b.Text, b.Detail),
+		})
+	}
+
 	findings = append(findings, coverageFindings...)
 
 	needsApproval := refuted > 0 || len(gaps) > 0
 	summary := fmt.Sprintf("verify: %d confirmed, %d plausible, %d refuted across %d claim(s)/finding(s)", confirmed, plausible, refuted, len(targets))
 	if len(gaps) > 0 {
 		summary += fmt.Sprintf("; %d behavior claim(s) with no runtime evidence", len(gaps))
+	}
+	if len(blindSpots) > 0 {
+		summary += fmt.Sprintf("; %d behavior claim(s) the coverage engine cannot instrument", len(blindSpots))
 	}
 	if coverageSummary != "" {
 		summary += "; " + coverageSummary
@@ -257,6 +277,24 @@ func (s *VerifyStep) runCoverageAudit(sctx *pipeline.StepContext) ([]Finding, st
 			Severity:    "warning",
 			Action:      types.ActionNoOp,
 			Description: fmt.Sprintf("coverage audit [%s]: %s:%d-%d — %s", is.Kind, is.Hunk.File, is.Hunk.Start, is.Hunk.End, is.Detail),
+		})
+	}
+	// Changed code the engine positively watched and never executed is the
+	// finding this whole subsystem exists to produce; it stays loud, and it is
+	// reported separately from the hunks the engine could not instrument, because
+	// only the first says the code did not run.
+	for _, h := range res.Report.NotExecuted {
+		findings = append(findings, Finding{
+			Severity:    "warning",
+			Action:      types.ActionNoOp,
+			Description: fmt.Sprintf("coverage: %s:%d-%d NOT EXECUTED — instrumentation watched these lines (or the statement enclosing them) and recorded zero hits", h.File, h.Start, h.End),
+		})
+	}
+	for _, h := range res.Report.Blind {
+		findings = append(findings, Finding{
+			Severity:    "warning",
+			Action:      types.ActionNoOp,
+			Description: fmt.Sprintf("coverage: %s:%d-%d UNINSTRUMENTED — the coverage engine emitted no line records here although the enclosing statement executed; this hunk is unmeasured, not unexecuted", h.File, h.Start, h.End),
 		})
 	}
 	return findings, res.Report.String(), res.Ledger

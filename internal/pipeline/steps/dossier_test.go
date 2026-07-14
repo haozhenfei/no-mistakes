@@ -225,3 +225,48 @@ func TestBuildDossier_CoverageOnlyStillRenders(t *testing.T) {
 		t.Fatalf("expected coverage ledger, got:\n%s", out)
 	}
 }
+
+// The third state must be visible in the dossier, not silently upgraded to a
+// pass and not silently reported as dead code. A reviewer reading the dossier
+// has to be able to tell "the engine watched this and it never ran" from "the
+// engine cannot emit records here".
+func TestBuildDossier_ShowsBlindHunksApartFromUnexecutedOnes(t *testing.T) {
+	blind := coverage.Hunk{File: "src/Row.tsx", Start: 14, End: 14}
+	dead := coverage.Hunk{File: "src/Row.tsx", Start: 7, End: 7}
+	data := DossierData{
+		RunID:  "run-1",
+		Commit: "abc",
+		Ledger: []coverage.LedgerEntry{
+			{
+				File: blind.File, StartLine: blind.Start, EndLine: blind.End,
+				State: coverage.StateAttested, Runtime: coverage.RuntimeUninstrumented,
+				Reason: "the coverage engine emitted no line record for this hunk",
+			},
+			{
+				File: dead.File, StartLine: dead.Start, EndLine: dead.End,
+				State: coverage.StateAttested, Runtime: coverage.RuntimeNotExecuted,
+			},
+		},
+		CoverageReport: &coverage.AuditReport{
+			TotalHunks: 2, Attested: 2,
+			Blind:       []coverage.Hunk{blind},
+			NotExecuted: []coverage.Hunk{dead},
+		},
+	}
+	out := BuildDossier(data)
+	if !strings.Contains(out, "uninstrumented (engine blind here)") {
+		t.Fatalf("the blind hunk's runtime class must show in the ledger table, got:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT executed") {
+		t.Fatalf("the unexecuted hunk must stay loud, got:\n%s", out)
+	}
+	if !strings.Contains(out, "could not instrument (unmeasured, NOT unexecuted)") {
+		t.Fatalf("the dossier must name the engine's blindness as such, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Changed code instrumentation saw NOT execute") {
+		t.Fatalf("the dossier must list provably unexecuted changed code separately, got:\n%s", out)
+	}
+	if strings.Contains(out, "🔒 runtime-verified") {
+		t.Fatalf("a blind hunk must never render as a machine-backed pass, got:\n%s", out)
+	}
+}

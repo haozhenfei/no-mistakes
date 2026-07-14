@@ -120,7 +120,15 @@ func newCoverageListCmd() *cobra.Command {
 				if e.Reason != "" {
 					reason = "\t" + e.Reason
 				}
-				fmt.Fprintf(w, "%s\t%s:%d-%d\t%s%s\n", e.ID, e.File, e.StartLine, e.EndLine, e.State, reason)
+				// The runtime class is the machine's own verdict (executed /
+				// not-executed / uninstrumented / no-data) and is empty until an
+				// audit has run; it is printed beside the state so "the engine
+				// cannot see this hunk" never reads as "this hunk did not run".
+				runtime := e.Runtime
+				if runtime == "" {
+					runtime = "not-audited"
+				}
+				fmt.Fprintf(w, "%s\t%s:%d-%d\t%s\t%s%s\n", e.ID, e.File, e.StartLine, e.EndLine, e.State, runtime, reason)
 			}
 			return nil
 		},
@@ -153,6 +161,12 @@ func newCoverageAuditCmd() *cobra.Command {
 			}
 			for _, is := range res.Report.Issues {
 				fmt.Fprintf(w, "issue [%s] %s:%d-%d — %s\n", is.Kind, is.Hunk.File, is.Hunk.Start, is.Hunk.End, is.Detail)
+			}
+			for _, h := range res.Report.NotExecuted {
+				fmt.Fprintf(w, "not-executed %s:%d-%d (instrumentation recorded zero hits)\n", h.File, h.Start, h.End)
+			}
+			for _, h := range res.Report.Blind {
+				fmt.Fprintf(w, "uninstrumented %s:%d-%d (engine emitted no records; enclosing statement executed)\n", h.File, h.Start, h.End)
 			}
 			if res.Report.Pass {
 				fmt.Fprintln(w, "coverage audit: PASS")
