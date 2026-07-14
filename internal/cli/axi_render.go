@@ -2,8 +2,11 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	toon "github.com/toon-format/toon-go"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -433,14 +436,14 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 func gateFields(gate stepView) []toon.Field {
 	parsed, _ := types.ParseFindingsJSON(gate.FindingsJSON)
 	gfields := []toon.Field{
-		{Key: "step", Value: gate.Name},
-		{Key: "status", Value: gate.Status},
+		{Key: "step", Value: safeAXIText(gate.Name)},
+		{Key: "status", Value: safeAXIText(gate.Status)},
 	}
 	if parsed.Summary != "" {
-		gfields = append(gfields, toon.Field{Key: "summary", Value: parsed.Summary})
+		gfields = append(gfields, toon.Field{Key: "summary", Value: safeAXIText(parsed.Summary)})
 	}
 	if parsed.RiskLevel != "" {
-		gfields = append(gfields, toon.Field{Key: "risk", Value: parsed.RiskLevel})
+		gfields = append(gfields, toon.Field{Key: "risk", Value: safeAXIText(parsed.RiskLevel)})
 	}
 	// Point-of-use reminder at the review gate: review auto-fix defaults to
 	// disabled, so agents should expect blocking and ask-user findings to park
@@ -451,11 +454,11 @@ func gateFields(gate stepView) []toon.Field {
 	rows := make([]findingRow, 0, len(parsed.Items))
 	for _, f := range parsed.Items {
 		rows = append(rows, findingRow{
-			ID:          f.ID,
-			Severity:    f.Severity,
-			File:        f.File,
-			Action:      f.Action,
-			Description: truncate(f.Description, maxFindingDesc),
+			ID:          safeAXIText(f.ID),
+			Severity:    safeAXIText(f.Severity),
+			File:        safeAXIText(f.File),
+			Action:      safeAXIText(f.Action),
+			Description: truncate(safeAXIText(f.Description), maxFindingDesc),
 		})
 	}
 	gfields = append(gfields, toon.Field{Key: "findings", Value: rows})
@@ -473,6 +476,20 @@ func gateFields(gate stepView) []toon.Field {
 	}
 }
 
+// safeAXIText removes terminal escape sequences and control bytes that are
+// meaningful in a TTY but invalid in TOON. Agent findings can quote raw test
+// output, including colored diagnostics; one such description must not make
+// the entire status document unrenderable.
+func safeAXIText(s string) string {
+	s = ansi.Strip(s)
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\n' && r != '\r' && r != '\t' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // truncate shortens s to limit runes, appending a disclosure of the full size
 // when it actually trims, per the AXI content-truncation convention.
 func truncate(s string, limit int) string {
@@ -485,20 +502,44 @@ func truncate(s string, limit int) string {
 
 // --- output helpers ---
 
-// axiDoc marshals an ordered set of TOON fields into a document with a trailing
-// newline. Encoding errors are impossible for the value shapes we build here,
-// so a failure degrades to an empty document rather than propagating.
-func axiDoc(fields ...toon.Field) string {
+// marshalAXIDoc marshals an ordered set of TOON fields into a document with a
+// trailing newline. Callers that produce command output must propagate its
+// error; otherwise an unsupported value becomes an empty, successful response.
+func marshalAXIDoc(fields ...toon.Field) (string, error) {
 	out, err := toon.MarshalString(toon.NewObject(fields...))
+	if err != nil {
+		return "", err
+	}
+	return out + "\n", nil
+}
+
+// axiDoc is the concise rendering helper used by shape-focused tests.
+func axiDoc(fields ...toon.Field) string {
+	out, err := marshalAXIDoc(fields...)
 	if err != nil {
 		return ""
 	}
-	return out + "\n"
+	return out
 }
 
 // emitDoc writes a finished TOON document to stdout.
 func emitDoc(cmd *cobra.Command, fields ...toon.Field) {
 	fmt.Fprint(cmd.OutOrStdout(), axiDoc(fields...))
+}
+
+// emitStatusDoc enforces the status command's no-silent-empty contract. A
+// renderer or writer failure is reported on stderr and exits non-zero so an
+// agent cannot confuse blindness with an idle repository.
+func emitStatusDoc(cmd *cobra.Command, fields ...toon.Field) error {
+	out, err := marshalAXIDoc(fields...)
+	if err == nil {
+		_, err = io.WriteString(cmd.OutOrStdout(), out)
+	}
+	if err == nil {
+		return nil
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "render axi status: %v\n", err)
+	return &exitError{code: 1}
 }
 
 // emitError renders a structured TOON error to stdout and returns an exitError

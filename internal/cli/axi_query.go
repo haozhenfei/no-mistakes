@@ -63,10 +63,12 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 		if runID != "" {
 			return "", emitError(cmd, 1, fmt.Sprintf("run %q not found", runID))
 		}
-		emitDoc(cmd,
+		if err := emitStatusDoc(cmd,
 			toon.Field{Key: "runs", Value: "0 runs yet in this repository"},
 			toon.Field{Key: "help", Value: []string{startRunHelp()}},
-		)
+		); err != nil {
+			return "", err
+		}
 		return env.repo.ID + "|no-runs", nil
 	}
 
@@ -85,7 +87,9 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 			fields = append(fields, toon.Field{Key: "error", Value: *run.Error})
 		}
 	}
-	emitDoc(cmd, fields...)
+	if err := emitStatusDoc(cmd, fields...); err != nil {
+		return "", err
+	}
 	return runStateFingerprint(rv), nil
 }
 
