@@ -69,6 +69,20 @@ no-mistakes daemon start
 
 If the socket file exists but nothing answers at all (a dead socket left behind by an unclean exit, e.g. a crash or `SIGKILL`), commands that ensure the daemon is running (`no-mistakes`, `init`, `attach`, `rerun`, `axi run`, `axi respond`) now fail fast with a `connect to daemon socket` error instead of silently starting a replacement daemon. The error message itself includes a `(run 'no-mistakes daemon start' to recover)` hint - run `no-mistakes daemon start` directly to recover, since it self-heals past a dead socket and starts a fresh daemon.
 
+### A run sits in `pending` forever, or fails with `signal: killed`
+
+Both are the same fault: the daemon cannot operate on the repository it was asked to gate, so it never gets past preparing the run.
+
+The usual cause is a **confined daemon**. The daemon is machine-wide and long-lived, but it gets auto-started by whichever CLI invocation first needs it — and if that invocation was running inside a sandboxed shell (an agent harness, for example), the daemon inherits that sandbox for the rest of its life. On macOS a sandbox profile is inherited by every child process and cannot be dropped from inside, so a daemon started this way is permanently confined to one agent's scope. Every repository outside that scope becomes unreachable to it, even though the same path works fine from your own shell. Its git subprocesses then either get killed (`signal: killed`) or never return at all.
+
+The daemon bounds this with [`run_setup_timeout`](/no-mistakes/reference/global-config/#run_setup_timeout) and fails the run with an error that names the recovery. Restart the daemon from an ordinary, unsandboxed shell:
+
+```sh
+no-mistakes daemon restart --force
+```
+
+If runs are instead failing because a cold worktree checkout of a large monorepo legitimately takes longer than the deadline, raise `run_setup_timeout` rather than restarting.
+
 ### Managed service logs
 
 - **macOS (launchd):** `launchctl list | grep no-mistakes` and check `~/Library/LaunchAgents/com.kunchenguid.no-mistakes.daemon.*.plist`

@@ -1087,18 +1087,60 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 		}
 	}
 
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
+		trackStartFailure("load_global_config")
+		return "", fmt.Errorf("load global config: %w", err)
+	}
+
+	// Everything from here to the pipeline launch forks a subprocess that can
+	// block forever: git worktree add, git config against the user's clone,
+	// git fetch against origin, the agent probe. The run row already exists and
+	// says `pending`, no step row exists yet, and no run log directory exists
+	// yet - so a subprocess that never returns leaves a run the client polls
+	// forever against a daemon that has stopped doing anything and logged
+	// nothing since "push received". That is the failure this deadline exists
+	// to convert into a visible, terminal one. See failSetup.
+	setupCtx, cancelSetup := context.WithTimeout(ctx, setupTimeout(globalCfg))
+	defer cancelSetup()
+
 	// Create worktree from the gate bare repo.
 	gateDir := m.paths.RepoDir(repo.ID)
 	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
-	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
-		trackStartFailure("create_worktree")
-		return "", fmt.Errorf("create worktree: %w", err)
+
+	// Track whether the background goroutine takes ownership of worktree cleanup.
+	// If setup fails before the goroutine launches, we must clean up here.
+	bgOwnsWorktree := false
+	worktreeCreated := false
+	defer func() {
+		if worktreeCreated && !bgOwnsWorktree {
+			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
+				slog.Warn("failed to remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
+			}
+		}
+	}()
+
+	// failSetup records a setup failure on the run and returns it. The run must
+	// reach a terminal status on every one of these paths: a run left `pending`
+	// is indistinguishable from a run that is working.
+	failSetup := func(stage, what string, err error) (string, error) {
+		err = explainSetupFailure(ctx, setupCtx, what, err)
+		if dbErr := m.db.UpdateRunError(run.ID, err.Error()); dbErr != nil {
+			slog.Error("failed to mark run failed after setup failure", "run_id", run.ID, "error", dbErr)
+		}
+		trackStartFailure(stage)
+		slog.Error("run setup failed", "run_id", run.ID, "stage", stage, "error", err)
+		return "", err
 	}
-	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
-		trackStartFailure("configure_worktree_identity")
-		return "", fmt.Errorf("configure worktree git identity: %w", err)
+
+	slog.Info("preparing run", "run_id", run.ID, "repo_id", repo.ID, "branch", branch, "head", headSHA, "worktree", wtDir)
+	if err := git.WorktreeAdd(setupCtx, gateDir, wtDir, headSHA); err != nil {
+		return failSetup("create_worktree", "create worktree", err)
+	}
+	worktreeCreated = true
+	if err := git.CopyLocalUserIdentity(setupCtx, repo.WorkingPath, wtDir); err != nil {
+		return failSetup("configure_worktree_identity", "configure worktree git identity", err)
 	}
 	// Fetch the trusted default branch and resolve it to an exact commit SHA
 	// before any read. Reading the trusted config at this pinned SHA (rather
@@ -1109,34 +1151,23 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 	// the resolve, a stale origin/<defaultBranch> left in the shared bare
 	// repo by a previous run could serve a trusted copy that the live default
 	// branch has already removed — silently running stale shell.
+	//
+	// A failed fetch is survivable (fail closed), but a fetch that hangs past
+	// the setup deadline is not: the run would otherwise be stuck here forever.
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
-		if err := git.FetchRemoteBranch(ctx, wtDir, "origin", repo.DefaultBranch); err != nil {
+		if err := git.FetchRemoteBranch(setupCtx, wtDir, "origin", repo.DefaultBranch); err != nil {
+			if setupCtx.Err() != nil {
+				return failSetup("fetch_default_branch", "fetch default branch "+repo.DefaultBranch, err)
+			}
 			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
-		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
+		} else if sha, err := git.ResolveRef(setupCtx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
 			slog.Warn("failed to resolve fetched default-branch ref; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else {
 			trustedSHA = sha
 		}
 	}
 
-	// Track whether the background goroutine takes ownership of worktree cleanup.
-	// If setup fails before the goroutine launches, we must clean up here.
-	bgOwnsWorktree := false
-	defer func() {
-		if !bgOwnsWorktree {
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
-			}
-		}
-	}()
-
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
-	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-		trackStartFailure("load_global_config")
-		return "", fmt.Errorf("load global config: %w", err)
-	}
 	repoCfg, err := config.LoadRepo(wtDir)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
@@ -1162,7 +1193,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 	// the pushed branch. With no trusted copy (fetch failed, no default branch,
 	// or no file on it) and no override, the opt-in is false and those fields
 	// are forced empty — fail closed.
-	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
+	trustedRepoCfg := loadTrustedRepoConfig(setupCtx, wtDir, trustedSHA, run.ID)
 	allowRepoCommands := resolveAllowRepoCommands(globalCfg, repo, trustedRepoCfg)
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	if allowRepoCommands {
@@ -1182,10 +1213,8 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, spec runSpec) 
 	if steps.IsDemoMode() {
 		ag = agent.NewNoop()
 	} else {
-		if err := cfg.ResolveAgent(ctx, exec.LookPath); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
-			trackStartFailure("resolve_agent")
-			return "", err
+		if err := cfg.ResolveAgent(setupCtx, exec.LookPath); err != nil {
+			return failSetup("resolve_agent", "resolve agent", err)
 		}
 		agents := cfg.Agents
 		if len(agents) == 0 {

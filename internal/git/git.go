@@ -19,6 +19,12 @@ import (
 // Used as a base when there is no prior commit to diff against.
 const EmptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+// gitWaitDelay bounds how long Run waits after ctx cancellation for a killed
+// git process's output pipes to close before giving up on them. It only ever
+// applies once the context is already done, so it can never cut short a healthy
+// git command however long it legitimately runs.
+const gitWaitDelay = 5 * time.Second
+
 // IsZeroSHA returns true if the SHA is the null/zero ref that git uses for
 // new or deleted branches (40 zeros).
 func IsZeroSHA(sha string) bool {
@@ -40,6 +46,16 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
+	// Cancelling ctx kills the git process, but cmd.Output() still waits for the
+	// stdout pipe to close - and the pipe is not held by the process, it is held
+	// by whoever inherited it. Two things defeat a bare CommandContext here:
+	// a git child that spawns its own helper (credential, ssh, hooks) which
+	// outlives the kill and keeps the pipe open, and a git child the kernel will
+	// not let die at all, which is what a process wedged in a denied filesystem
+	// call looks like - SIGKILL stays pending until it returns, and it never
+	// returns. Without a WaitDelay, Wait blocks forever in both cases and the
+	// caller's context deadline buys nothing. See internal/daemon/setup.go.
+	cmd.WaitDelay = gitWaitDelay
 	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {

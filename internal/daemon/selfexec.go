@@ -266,6 +266,19 @@ func startDetachedDaemon(p *paths.Paths) error {
 
 	cmd := exec.Command(exe, "daemon", "run", "--root", p.Root())
 	cmd.Env = upsertEnv(os.Environ(), "NM_HOME", p.Root())
+	// Root the daemon at NM_HOME instead of inheriting the cwd of whichever CLI
+	// process happened to auto-start it. The daemon is machine-wide and outlives
+	// every caller, but the caller is usually a `no-mistakes axi run` inside some
+	// checkout - in practice an agent's disposable worktree, which gets recycled
+	// out from under the long-lived daemon that is still sitting in it. Nothing
+	// in the daemon works relative to cwd (every git call passes an explicit
+	// dir), so there is no reason to hold a directory it does not own.
+	//
+	// This does NOT free the daemon from a sandbox the caller was under: on macOS
+	// a seatbelt profile is inherited by all descendants and cannot be dropped
+	// from inside, so a daemon forked from a confined shell stays confined for
+	// life. That failure is caught, not prevented - see explainSetupFailure.
+	cmd.Dir = p.Root()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	// Detach from parent process group so daemon survives CLI exit.

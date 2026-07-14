@@ -38,6 +38,8 @@ step_quiet_warning: "10m"
 
 daemon_connect_timeout: "3s"
 
+run_setup_timeout: "10m"
+
 log_level: info
 
 session_reuse: true
@@ -262,6 +264,21 @@ Maximum time a CLI client waits for an existing daemon socket to accept a connec
 | Default | `3s`                   |
 
 Accepts any positive Go `time.ParseDuration` string. Overridable per-invocation with the `NM_DAEMON_CONNECT_TIMEOUT` environment variable; see [Environment Variables](/no-mistakes/reference/environment/#nm_daemon_connect_timeout).
+
+### run_setup_timeout
+
+Maximum time the daemon spends preparing a run before the pipeline starts: creating the worktree from the gate, copying the git identity from your clone, fetching the trusted default branch, and resolving the agent.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `10m`                  |
+
+Each of those steps forks a git subprocess, and a subprocess that never returns used to leave the run stuck in `pending` with no steps and no logs while the client polled it. Exceeding this deadline instead fails the run with a reason on the run row.
+
+The most common cause of a run that cannot be prepared is a **confined daemon**: the daemon was auto-started from inside a sandboxed shell (an agent harness, for example), inherited that sandbox for its whole life, and cannot reach a repository outside the sandbox's scope — even though the same path works from your own shell. The failure message says so and tells you to restart the daemon from an unsandboxed shell with `no-mistakes daemon restart --force`. See [Troubleshooting](/no-mistakes/guides/troubleshooting/).
+
+Accepts any positive Go `time.ParseDuration` string. Raise it if a cold worktree checkout of a large monorepo legitimately takes longer than the default.
 
 ### log_level
 
