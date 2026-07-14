@@ -65,6 +65,116 @@ func axiScenario(t *testing.T) string {
 	return path
 }
 
+func axiFixReviewScenario(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "axi-fix-review-scenario.yaml")
+	content := `actions:
+  - match: "whose job is to REFUTE"
+    text: "the evidence supports the claim"
+    structured:
+      verdict: CONFIRMED
+      rationale: "fakeagent: the captured evidence supports the claim"
+  - match: "review scope: current worktree and HEAD changes relative"
+    text: "the attempted fix still needs review"
+    structured:
+      findings:
+        - id: "review-after-fix-1"
+          severity: error
+          file: "feature.txt"
+          line: 1
+          description: "the fix still fails: \e[31mregression\e[0m"
+          action: ask-user
+      summary: "fix needs review"
+      risk_level: high
+      risk_rationale: "the regression remains"
+  - match: "Investigate previous review findings and address legitimate ones."
+    text: "applied the requested fix"
+    edits:
+      - path: "feature.txt"
+        old: "change"
+        new: "fixed"
+    structured:
+      summary: "address review finding"
+  - match: "Review the code changes and return structured findings"
+    text: "review found a fixable issue"
+    structured:
+      findings:
+        - id: "review-1"
+          severity: warning
+          file: "feature.txt"
+          line: 1
+          description: "fix this issue"
+          action: ask-user
+      summary: "found 1 issue"
+      risk_level: medium
+      risk_rationale: "warning requires review"
+  - text: "no issues found"
+    structured:
+      findings: []
+      summary: "no issues found"
+      risk_level: low
+      risk_rationale: "no risks detected in the diff"
+      tested:
+        - "fakeagent: simulated test run"
+      testing_summary: "simulated tests passed"
+      title: "feat: fakeagent change"
+      body: "fakeagent canned PR body"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write axi fix-review scenario: %v", err)
+	}
+	return path
+}
+
+func TestAxiStatusShowsRealParkedFixReviewRun(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiFixReviewScenario(t)})
+
+	h.CommitChange("init-axi-fix-review", "seed.txt", "seed\n", "seed for axi fix review")
+	initWorktree := h.AddWorktree("init-axi-fix-review")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+
+	h.CommitChange("feature/axi-fix-review", "feature.txt", "change\n", "add feature change")
+	fw := h.AddWorktree("feature/axi-fix-review")
+	if out, err := h.RunInDir(fw, "axi", "run", "--intent", axiIntent); err != nil {
+		t.Fatalf("axi run: %v\n%s", err, out)
+	}
+	if gated := waitForStepStatus(t, h, "feature/axi-fix-review", types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second); gated == nil {
+		t.Fatal("expected initial review gate")
+	}
+
+	fixOut, err := h.RunInDir(fw, "axi", "respond", "--action", "fix", "--findings", "review-1")
+	if err != nil {
+		t.Fatalf("axi respond fix: %v\n%s", err, fixOut)
+	}
+	if gated := waitForStepStatus(t, h, "feature/axi-fix-review", types.StepReview, types.StepStatusFixReview, 60*time.Second); gated == nil {
+		t.Fatal("expected fix_review gate")
+	}
+
+	statusOut, err := h.RunInDir(fw, "axi", "status")
+	if err != nil {
+		t.Fatalf("axi status at fix_review: %v\n%s", err, statusOut)
+	}
+	t.Logf("real parked fix_review status output:\n%s", statusOut)
+	for _, want := range []string{
+		"run:\n",
+		"review,fix_review,1",
+		"gate:\n",
+		"step: review\n",
+		"status: fix_review\n",
+		"review-after-fix-1,error,feature.txt,ask-user",
+		"the fix still fails: regression",
+	} {
+		if !strings.Contains(statusOut, want) {
+			t.Errorf("axi status missing %q in:\n%s", want, statusOut)
+		}
+	}
+	if strings.Contains(statusOut, "\x1b") {
+		t.Fatalf("axi status leaked terminal escapes:\n%s", statusOut)
+	}
+}
+
 // TestAxiAgentJourney proves an autonomous agent can drive a full no-mistakes
 // pipeline headlessly through the `no-mistakes axi` surface in an isolated
 // dummy environment: init installs the skill, the home view reports state,

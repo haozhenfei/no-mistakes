@@ -304,6 +304,243 @@ func TestWriteGateShape(t *testing.T) {
 	}
 }
 
+func TestWriteFixReviewGateShape(t *testing.T) {
+	gate := stepView{
+		Name:   "test",
+		Status: string(types.StepStatusFixReview),
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "test-1", Severity: "error", File: "main.go", Action: types.ActionAskUser, Description: "the fix still fails: \x1b[31mregression\x1b[0m"},
+		}, "fix needs review"),
+	}
+	rv := runView{
+		ID:      "run-fix-review",
+		Branch:  "feature/fix-review",
+		Status:  string(types.RunRunning),
+		HeadSHA: "abcdef1234567890",
+		Steps:   []stepView{gate},
+	}
+	out := axiDoc(append([]toon.Field{runObjectField(rv)}, gateFields(gate)...)...)
+
+	for _, want := range []string{
+		"run:\n",
+		"test,fix_review,1,0\n",
+		"gate:\n",
+		"  step: test\n",
+		"  status: fix_review\n",
+		"  summary: fix needs review\n",
+		"test-1,error,main.go,ask-user",
+		"the fix still fails: regression",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("fix_review gate missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestEmitStatusDocReportsUnrenderableStatus(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	err := emitStatusDoc(cmd, toon.Field{Key: "run", Value: "invalid \x00 status"})
+	if err == nil {
+		t.Fatal("emitStatusDoc should fail when TOON cannot render the status")
+	}
+	var exitErr *exitError
+	if !errors.As(err, &exitErr) || exitErr.code == 0 {
+		t.Fatalf("emitStatusDoc error = %T %v, want non-zero exitError", err, err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("unrenderable status wrote stdout %q, want empty", stdout.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "render axi status") || !strings.Contains(got, "unsupported control character") {
+		t.Fatalf("unrenderable status stderr = %q, want descriptive render error", got)
+	}
+}
+
+func TestAxiStatusRendersParkedFixReviewRun(t *testing.T) {
+	database, dbRun := setupAxiStatusRun(t, "feature/fix-review")
+	step, err := database.InsertStepResult(dbRun.ID, types.StepTest)
+	if err != nil {
+		t.Fatalf("insert test step: %v", err)
+	}
+	findings := findingsJSON(t, []types.Finding{
+		{ID: "test-1", Severity: "error", File: "main.go", Action: types.ActionAskUser, Description: "still failing: \x1b[31mregression\x1b[0m"},
+	}, "fix needs review")
+	if err := database.SetStepFindings(step.ID, findings); err != nil {
+		t.Fatalf("set findings: %v", err)
+	}
+	if err := database.UpdateStepStatusWithDuration(step.ID, types.StepStatusFixReview, 1234); err != nil {
+		t.Fatalf("park step at fix_review: %v", err)
+	}
+	if err := database.SetRunAwaitingAgent(dbRun.ID); err != nil {
+		t.Fatalf("park run: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if _, err := runAxiStatus(cmd, dbRun.ID); err != nil {
+		t.Fatalf("axi status: %v\nstderr:\n%s\nstdout:\n%s", err, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("axi status stderr = %q, want empty", stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"run:\n",
+		"status: running\n",
+		"awaiting_agent: parked ",
+		"test,fix_review,1,1234",
+		"gate:\n",
+		"step: test\n",
+		"status: fix_review\n",
+		"test-1,error,main.go,ask-user",
+		"still failing: regression",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("axi status missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "\x1b") {
+		t.Fatalf("axi status leaked terminal escapes:\n%s", got)
+	}
+}
+
+func TestAxiStatusUnrenderableRunFailsLoudly(t *testing.T) {
+	_, dbRun := setupAxiStatusRun(t, "feature/bad\x00branch")
+
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	_, err := runAxiStatus(cmd, dbRun.ID)
+	if err == nil {
+		t.Fatal("axi status should fail when the selected run cannot be rendered")
+	}
+	var exitErr *exitError
+	if !errors.As(err, &exitErr) || exitErr.code == 0 {
+		t.Fatalf("axi status error = %T %v, want non-zero exitError", err, err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("unrenderable status wrote stdout %q, want empty", stdout.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "render axi status") || !strings.Contains(got, "unsupported control character") {
+		t.Fatalf("unrenderable status stderr = %q, want descriptive render error", got)
+	}
+}
+
+func TestAxiStatusRendersEveryStepStatus(t *testing.T) {
+	statuses := []types.StepStatus{
+		types.StepStatusPending,
+		types.StepStatusRunning,
+		types.StepStatusAwaitingApproval,
+		types.StepStatusFixing,
+		types.StepStatusFixReview,
+		types.StepStatusCompleted,
+		types.StepStatusSkipped,
+		types.StepStatusFailed,
+	}
+	for _, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			gateStatus := status == types.StepStatusAwaitingApproval || status == types.StepStatusFixReview
+			step := stepView{Name: "test", Status: string(status)}
+			if gateStatus {
+				step.FindingsJSON = findingsJSON(t, []types.Finding{{ID: "test-1", Severity: "error", Action: types.ActionAskUser, Description: "needs review"}}, "gate")
+			}
+			rv := runView{ID: "run-1", Branch: "feature/state", Status: string(types.RunRunning), HeadSHA: "abcdef1234567890", Steps: []stepView{step}}
+			fields := []toon.Field{runObjectField(rv)}
+			if gateStatus {
+				fields = append(fields, gateFields(step)...)
+			}
+
+			var stdout, stderr bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			if err := emitStatusDoc(cmd, fields...); err != nil {
+				t.Fatalf("render status %s: %v\nstderr: %s", status, err, stderr.String())
+			}
+			if stdout.Len() == 0 {
+				t.Fatalf("render status %s produced empty output", status)
+			}
+			if !strings.Contains(stdout.String(), "test,"+string(status)) {
+				t.Fatalf("render status %s missing step row:\n%s", status, stdout.String())
+			}
+			if gateStatus && !strings.Contains(stdout.String(), "gate:\n") {
+				t.Fatalf("render status %s missing gate:\n%s", status, stdout.String())
+			}
+		})
+	}
+}
+
+func TestAxiStatusRendersEveryRunStatus(t *testing.T) {
+	statuses := []types.RunStatus{
+		types.RunPending,
+		types.RunRunning,
+		types.RunCompleted,
+		types.RunFailed,
+		types.RunCancelled,
+	}
+	for _, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			rv := runView{ID: "run-1", Branch: "feature/state", Status: string(status), HeadSHA: "abcdef1234567890"}
+			var stdout, stderr bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			if err := emitStatusDoc(cmd, runObjectField(rv)); err != nil {
+				t.Fatalf("render run status %s: %v\nstderr: %s", status, err, stderr.String())
+			}
+			if stdout.Len() == 0 || !strings.Contains(stdout.String(), "status: "+string(status)) {
+				t.Fatalf("render run status %s produced invalid output:\n%s", status, stdout.String())
+			}
+		})
+	}
+}
+
+func setupAxiStatusRun(t *testing.T, branch string) (*db.DB, *db.Run) {
+	t.Helper()
+	repoDir := t.TempDir()
+	nmHome := makeSocketSafeTempDir(t)
+	t.Setenv("NM_HOME", nmHome)
+	run(t, repoDir, "git", "init")
+	run(t, repoDir, "git", "config", "user.email", "test@test.com")
+	run(t, repoDir, "git", "config", "user.name", "Test")
+	run(t, repoDir, "git", "commit", "--allow-empty", "-m", "initial")
+	rawRoot, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		rawRoot = repoDir
+	}
+	chdir(t, rawRoot)
+
+	p := paths.WithRoot(nmHome)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	repo, err := database.InsertRepoWithID("repo-1", rawRoot, "origin", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	dbRun, err := database.InsertRun(repo.ID, branch, "abcdef1234567890", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	return database, dbRun
+}
+
 // TestGateNote_ReviewOnly verifies the review-auto-fix-disabled note appears
 // only at the review gate, while the keep-driving reminder appears at every
 // gate.
