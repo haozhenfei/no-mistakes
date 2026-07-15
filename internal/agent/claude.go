@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
@@ -46,6 +47,16 @@ func (a *claudeAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 }
 
 func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
+	// The gate mirror is created and owned by no-mistakes, so it is trusted by
+	// construction; mark it trusted in ~/.claude.json before spawning, or claude
+	// exits non-zero over an untrusted workspace after the agent's work is done.
+	// Best-effort: a failure only means the run may still hit the trust error, so
+	// log and continue rather than fail the step here.
+	if err := ensureClaudeWorkspaceTrusted(ctx, opts.CWD); err != nil {
+		slog.Warn("could not pre-trust claude workspace; run may fail on workspace trust",
+			"cwd", opts.CWD, "err", err)
+	}
+
 	resumeID := ""
 	if opts.Session != nil {
 		resumeID = opts.Session.ID
