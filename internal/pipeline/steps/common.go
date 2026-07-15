@@ -125,6 +125,13 @@ var reviewFindingsSchema = json.RawMessage(`{
 // Post-PR monitoring is a watch run's job (see WatchSteps), so this sequence no
 // longer ends in a blocking CI poll that holds the worktree for days.
 // When NM_DEMO=1, it returns mock steps for demo recordings.
+//
+// This is the concrete-constructor twin of types.GateSteps() and must list the
+// same steps in the same order. &VerifyStep{} is intentionally absent so the
+// executor never runs verify by default (the executor iterates this list, not
+// GateSteps) - see the reversal note on types.GateSteps. The VerifyStep type
+// itself is preserved; to re-enable, add &VerifyStep{} back here and StepVerify
+// to types.GateSteps() at the matching position.
 func AllSteps() []pipeline.Step {
 	if IsDemoMode() {
 		return DemoSteps()
@@ -135,7 +142,6 @@ func AllSteps() []pipeline.Step {
 		&FixStep{},
 		&ReviewStep{},
 		&TestStep{},
-		&VerifyStep{},
 		&DocumentStep{},
 		&LintStep{},
 		&PushStep{},
