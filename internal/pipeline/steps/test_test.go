@@ -374,13 +374,15 @@ func TestTestStep_MissingRuntimeEvidenceFindingParks(t *testing.T) {
 
 func TestAllStepsHasNoQAStep(t *testing.T) {
 	t.Parallel()
+	// verify is intentionally absent: it was removed from the default gate
+	// pipeline (see the reversal note on types.GateSteps and AllSteps). AllSteps
+	// must stay in sync with types.GateSteps.
 	want := []types.StepName{
 		types.StepIntent,
 		types.StepRebase,
 		types.StepFix,
 		types.StepReview,
 		types.StepTest,
-		types.StepVerify,
 		types.StepDocument,
 		types.StepLint,
 		types.StepPush,

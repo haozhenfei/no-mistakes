@@ -8,14 +8,22 @@ The pipeline runs a fixed, opinionated sequence of steps. Order is not configura
 A gated push produces a **gate run**, which ends at the PR. Everything after the PR belongs to a **watch run**.
 
 ```
-gate run:   intent → rebase → fix → review → test → verify → document → lint → push → pr
+gate run:   intent → rebase → fix → review → test → document → lint → push → pr
 watch run:  watch  (polls the PR the gate run opened)
             qa     (only when asked for; runs at the same time as watch)
 ```
 
+The **verify** step is not in the default sequence. It runs an adversarial
+re-adjudication of evidence-bound claims and semantic review findings, which
+costs a full extra agent session for little marginal value on evidence-thin
+changes, so it was taken out of the default pipeline to keep a simple change
+fast. Its implementation is retained; see the [Verify
+step](/no-mistakes/reference/pipeline-steps/#verify) for what it does and how to
+put it back.
+
 ```mermaid
 flowchart LR
-  intent["Intent"] --> rebase["Rebase"] --> fix["Fix"] --> review["Review"] --> test["Test"] --> verify["Verify"] --> document["Document"] --> lint["Lint"] --> push["Push"] --> pr["PR"]
+  intent["Intent"] --> rebase["Rebase"] --> fix["Fix"] --> review["Review"] --> test["Test"] --> document["Document"] --> lint["Lint"] --> push["Push"] --> pr["PR"]
   pr ==> watch["Watch run: watch + qa (concurrent)"]
   review -. findings .-> action["Approve / fix / skip / abort"]
   test -. findings .-> action

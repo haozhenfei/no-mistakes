@@ -166,8 +166,19 @@ func (s StepName) Order() int {
 
 // GateSteps returns the gate pipeline in execution order. It terminates at the
 // PR: everything after that boundary is a watch run's business.
+//
+// verify (StepVerify) is intentionally NOT in this default sequence. It was
+// removed because a simple change spends ~25 extra minutes and a full agent
+// session on the adversarial claim/finding re-adjudication, which has low
+// marginal value on evidence-thin changes. The removal is deliberately
+// reversible and nothing else was touched: the StepVerify constant, its fixed
+// Order() (6, now a reserved gap in the sequence), the whole VerifyStep
+// implementation in internal/pipeline/steps/verify.go, and its tests all remain.
+// To put verify back in the default pipeline, add StepVerify here AND add
+// &VerifyStep{} to steps.AllSteps() at the same position (the two lists must
+// stay in sync); no other change is required.
 func GateSteps() []StepName {
-	return []StepName{StepIntent, StepRebase, StepFix, StepReview, StepTest, StepVerify, StepDocument, StepLint, StepPush, StepPR}
+	return []StepName{StepIntent, StepRebase, StepFix, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR}
 }
 
 // WatchSteps returns the watch pipeline in execution order.

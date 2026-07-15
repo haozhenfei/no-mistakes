@@ -8,7 +8,10 @@ import (
 
 func TestGateStepsOrder(t *testing.T) {
 	steps := GateSteps()
-	expected := []StepName{StepIntent, StepRebase, StepFix, StepReview, StepTest, StepVerify, StepDocument, StepLint, StepPush, StepPR}
+	// verify is intentionally removed from the default gate sequence (see the
+	// reversal note on GateSteps). StepVerify and its Order() (6) are kept, so a
+	// reserved gap sits between test (5) and document (7).
+	expected := []StepName{StepIntent, StepRebase, StepFix, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR}
 	if len(steps) != len(expected) {
 		t.Fatalf("expected %d gate steps, got %d", len(expected), len(steps))
 	}
@@ -18,8 +21,10 @@ func TestGateStepsOrder(t *testing.T) {
 		}
 	}
 	// The gate pipeline ends at the PR: post-PR monitoring is a watch run.
+	// verify is deliberately removed from the default sequence for speed (kept in
+	// code, see GateSteps); a regression that re-adds it must be intentional.
 	for _, s := range steps {
-		if s == StepCI || s == StepWatch {
+		if s == StepCI || s == StepWatch || s == StepVerify {
 			t.Fatalf("gate pipeline must not contain %q", s)
 		}
 	}
@@ -90,8 +95,8 @@ func TestGateStepsExcludesOnDemandSteps(t *testing.T) {
 			t.Fatalf("GateSteps() contains the on-demand step %q; an ordinary run would pay for it", step)
 		}
 	}
-	if len(GateSteps()) != 10 {
-		t.Fatalf("GateSteps() = %v, want the unchanged ten-step gate sequence", GateSteps())
+	if len(GateSteps()) != 9 {
+		t.Fatalf("GateSteps() = %v, want the nine-step gate sequence (verify removed from the default)", GateSteps())
 	}
 }
 

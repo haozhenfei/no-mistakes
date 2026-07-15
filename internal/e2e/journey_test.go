@@ -2608,13 +2608,17 @@ func assertPipelineStepsInOrder(t *testing.T, steps []ipc.StepResultInfo) {
 	t.Helper()
 	// The gate pipeline ends at the PR. Post-PR monitoring is a watch run's
 	// job (see TestPRHandsOffToWatchRun), so there is no blocking ci step here.
-	expected := []types.StepName{types.StepIntent, types.StepRebase, types.StepFix, types.StepReview, types.StepTest, types.StepVerify, types.StepDocument, types.StepLint, types.StepPush, types.StepPR}
+	// verify is intentionally not in the default sequence (see types.GateSteps);
+	// StepOrder is the step's fixed Order(), so verify's reserved order (6) leaves
+	// a gap - assert each step carries its own canonical order, not a contiguous
+	// 1..N, so re-adding verify needs no renumbering.
+	expected := []types.StepName{types.StepIntent, types.StepRebase, types.StepFix, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR}
 	if len(steps) != len(expected) {
 		t.Fatalf("pipeline recorded %d steps, want %d", len(steps), len(expected))
 	}
 	for i, step := range steps {
-		if step.StepOrder != i+1 {
-			t.Errorf("step %d order = %d, want %d", i, step.StepOrder, i+1)
+		if step.StepOrder != expected[i].Order() {
+			t.Errorf("step %d (%s) order = %d, want %d", i, step.StepName, step.StepOrder, expected[i].Order())
 		}
 		if step.StepName != expected[i] {
 			t.Errorf("step %d name = %s, want %s", i, step.StepName, expected[i])

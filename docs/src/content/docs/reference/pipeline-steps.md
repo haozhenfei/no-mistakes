@@ -6,9 +6,13 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```
-gate run:   intent → rebase → fix → review → test → verify → document → lint → push → pr
+gate run:   intent → rebase → fix → review → test → document → lint → push → pr
 watch run:  watch
 ```
+
+The **verify** step is retained in code but is not part of the default gate
+sequence (see [Pipeline](/no-mistakes/concepts/pipeline/)); the [Verify](#verify)
+section below documents its behavior for when it is enabled.
 
 A gated push runs the gate pipeline, which ends at the PR. The `watch` step is the whole of a [watch run](/no-mistakes/concepts/pipeline/#watch-runs), which the gate run derives once the PR exists.
 
@@ -115,6 +119,15 @@ Runs baseline tests and gathers evidence for the intended behavior.
 
 Adversarially verifies evidence-bound claims and audits the coverage ledger.
 
+:::note
+Verify is **not in the default gate pipeline**. It was removed because it spends
+a full extra agent session on a change for low marginal value on evidence-thin
+work. The step's implementation is kept intact; to put it back, add `StepVerify`
+to `GateSteps()` in `internal/types/types.go` and `&VerifyStep{}` to `AllSteps()`
+in `internal/pipeline/steps/common.go` (the two lists must stay in sync). The
+rest of this section describes its behavior when enabled.
+:::
+
 **Behavior:**
 - Loads signed evidence and registered claims from the run
 - Uses independent skeptic prompts to adjudicate evidence-bound claims as `CONFIRMED`, `PLAUSIBLE`, or `REFUTED`. `verify.skeptics` sets how many run per claim; it defaults to `1`, so a single skeptic's verdict is final. Majority voting only applies when it is raised to `3` or more, at the cost of that many agent calls per claim
@@ -190,7 +203,7 @@ Pushes the validated branch to the configured push target.
 A remote branch can move without being rejected when all remote commits are already represented in the validated head, or when a run is intentionally rewriting history it already knew about.
 Any other out-of-band commit stops the push instead of being overwritten.
 
-This step never requires approval - it runs automatically after review, test, verify, document, and lint pass.
+This step never requires approval - it runs automatically after review, test, document, and lint pass.
 
 ## PR
 
